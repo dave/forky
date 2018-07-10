@@ -197,6 +197,39 @@ func (s *Session) parse(files map[string]map[string]bool, rootDir string) error 
 			return err
 		}
 
+		// Manipulating the AST breaks "lossy" comments - e.g. comments not attached to a node. They
+		// end up being rendered in the wrong place which breaks things. I don't think there's any other
+		// option right now except deleting them all.
+		for _, pkg := range packages {
+			for _, f := range pkg.Files {
+				comments := map[*ast.CommentGroup]bool{}
+				ast.Inspect(f, func(n ast.Node) bool {
+					switch n := n.(type) {
+					case *ast.CommentGroup:
+						comments[n] = true
+					}
+					return true
+				})
+				// delete all comments that don't occur in the inspect
+				var fc []*ast.CommentGroup
+				for _, cg := range f.Comments {
+					if comments[cg] {
+						fc = append(fc, cg)
+						continue
+					}
+					for _, c := range cg.List {
+						// don't delete build tags (they are at the start of the file, so won't get broken
+						// by manipulating AST
+						if strings.HasPrefix(c.Text, "// +build ") {
+							fc = append(fc, cg)
+							break
+						}
+					}
+				}
+				f.Comments = fc
+			}
+		}
+
 		info.Packages = packages
 
 		// build a list of all the parsed files

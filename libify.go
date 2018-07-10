@@ -1,12 +1,8 @@
 package migraty
 
 import (
-	"fmt"
 	"go/ast"
-	"go/format"
 	"go/token"
-	"os"
-	"path/filepath"
 
 	"golang.org/x/tools/go/ast/astutil"
 )
@@ -22,7 +18,7 @@ func (m Libify) Apply(s *Session) Applier {
 			for relpath, info := range s.paths {
 				for name, pkg := range info.Packages {
 					for fpath, file := range pkg.Files {
-						_, fname := filepath.Split(fpath)
+						//_, fname := filepath.Split(fpath)
 						_ = relpath
 						_ = name
 						f := func(c *astutil.Cursor) bool {
@@ -50,11 +46,11 @@ func (m Libify) Apply(s *Session) Applier {
 									}}
 								}
 								c.Replace(n)
-								if fname == "elf.go" {
-									fmt.Println("-----------------")
-									format.Node(os.Stdout, s.fset, c.Node())
-									fmt.Println("-----------------")
-								}
+								//if fname == "elf.go" {
+								//	fmt.Println("-----------------")
+								//	format.Node(os.Stdout, s.fset, c.Node())
+								//	fmt.Println("-----------------")
+								//}
 
 							}
 							return true

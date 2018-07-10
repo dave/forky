@@ -197,18 +197,6 @@ func (s *Session) parse(files map[string]map[string]bool, rootDir string) error 
 			return err
 		}
 
-		for _, pkg := range packages {
-			for _, f := range pkg.Files {
-				astutil.Apply(f, func(c *astutil.Cursor) bool {
-					switch n := c.Node().(type) {
-					case *ast.CommentMap:
-						fmt.Println("CommentMap:", n)
-					}
-					return true
-				}, nil)
-			}
-		}
-
 		info.Packages = packages
 
 		// build a list of all the parsed files

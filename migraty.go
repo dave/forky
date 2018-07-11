@@ -24,6 +24,7 @@ import (
 
 type Session struct {
 	fs          billy.Filesystem
+	gorootfs    billy.Filesystem
 	fset        *token.FileSet
 	root        string               // root path
 	paths       map[string]*PathInfo // relative path from root -> path info (may include several packages)
@@ -35,6 +36,7 @@ type Session struct {
 func NewSession(rootpath string) *Session {
 	return &Session{
 		fs:        osfs.New("/"),
+		gorootfs:  osfs.New(build.Default.GOROOT),
 		gopathsrc: filepath.Join(build.Default.GOPATH, "src"),
 		fset:      token.NewFileSet(),
 		root:      rootpath,

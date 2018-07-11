@@ -99,8 +99,9 @@ var Default = []migraty.Mutator{
 
 	// All tests pass now!
 
-	migraty.Libify{
-		Path: "src/cmd/compile/internal/gc",
-		Name: "gc",
-	},
+	//migraty.Libify{
+	//	map[string]map[string]bool{
+	//		"src/cmd/compile/internal/gc": {"gc": true},
+	//	},
+	//},
 }

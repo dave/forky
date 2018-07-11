@@ -19,10 +19,10 @@ func TestAll(t *testing.T) {
 	tests := map[string]testspec{
 		"libify simple": {
 			files:    `func Foo() {}`,
-			mutators: Libify{Path: "a", Name: "a"},
+			mutators: Libify{map[string]map[string]bool{"a": {"a": true}}},
 			expected: map[string]string{
 				"a.go": `func (psess *PackageSession) Foo() {}`,
-				"package.go": `
+				"package-session.go": `
 					type PackageSession struct {
 					}
 					func NewPackageSession() *PackageSession {
@@ -32,10 +32,10 @@ func TestAll(t *testing.T) {
 		},
 		"libify other methods": {
 			files:    `func (f F) Foo() {}`,
-			mutators: Libify{Path: "a", Name: "a"},
+			mutators: Libify{map[string]map[string]bool{"a": {"a": true}}},
 			expected: map[string]string{
 				"a.go": `func (f F) Foo(psess *PackageSession) {}`,
-				"package.go": `
+				"package-session.go": `
 					type PackageSession struct {
 					}
 					func NewPackageSession() *PackageSession {

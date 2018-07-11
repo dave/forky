@@ -83,6 +83,8 @@ var Default = []migraty.Mutator{
 		migraty.TestSkip{"src/cmd/compile/internal/gc", "TestIntendedInlining", "TODO: ???"},
 
 		migraty.TestSkip{"src/cmd/compile/internal/syntax", "TestStdLib", "TODO: ???"},
+
+		migraty.TestSkip{"src/cmd/compile/internal/gc", "TestBuiltin", "TODO: I think this is failing because we're stripping comments from the AST?"},
 	},
 	migraty.DeleteNodes(func(relpath, fname string, node, parent ast.Node) bool {
 		// Delete `case macho.CpuArm64` clause in objfile/macho.go

@@ -1,56 +1,98 @@
 package migraty
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/format"
+	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/dave/services/fsutil"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/loader"
 	"gopkg.in/src-d/go-billy.v4"
+	"gopkg.in/src-d/go-billy.v4/memfs"
 )
 
 type Libify struct {
 	Packages map[string]map[string]bool // package path -> package name -> true
+	Root     string
 }
 
 func (m Libify) Apply(s *Session) Applier {
 	return Applier{
 		Func: func() {
 
-			/*
-				lc := loader.Config{
-					Fset:  s.fset,
-					Build: buildContext(s.gorootfs, memfs.New()),
-				}
-				for relpath, pathInfo := range s.paths {
-					for _, pkg := range pathInfo.Packages {
-						var files []*ast.File
-						for _, file := range pkg.Files {
-							files = append(files, file)
+			// save all files to a memfs
+			gopathfs := memfs.New()
+			var count int
+			for relpath, info := range s.paths {
+				fmt.Fprintf(s.out, "\rScanning: %d/%d", count+1, len(s.paths))
+				count++
+				for _, pkg := range info.Packages {
+					for fname, file := range pkg {
+
+						if file == nil {
+							continue
 						}
-						lc.CreateFromFiles(path.Join(s.root, relpath), files...)
+
+						rootrelfpath := filepath.Join("gopath", "src", m.Root, relpath, fname)
+
+						buf := &bytes.Buffer{}
+						if err := format.Node(buf, s.fsetAst, file); err != nil {
+							panic(fmt.Errorf("format.Node error in %s: %v", rootrelfpath, err))
+						}
+
+						if err := fsutil.WriteFile(gopathfs, rootrelfpath, 0666, buf); err != nil {
+							panic(err)
+						}
 					}
 				}
-				p, err := lc.Load()
-				if err != nil {
-					panic(err)
+			}
+
+			bc := buildContext(s.gorootfs, gopathfs, m.Root)
+			lc := loader.Config{
+				ParserMode: parser.ParseComments,
+				Fset:       s.fsetLoader,
+				Build:      bc,
+				Cwd:        "/",
+			}
+			for relpath := range m.Packages {
+				lc.Import(path.Join(m.Root, relpath))
+			}
+			p, err := lc.Load()
+			if err != nil {
+				panic(err)
+			}
+			for pkg, info := range p.AllPackages {
+				relpath := strings.TrimPrefix(pkg.Path(), m.Root+"/")
+				if s.paths[relpath] == nil {
+					// only update packages that exist in s.paths (in infos we also have std lib etc).
+					continue
 				}
-				for pkg, info := range p.AllPackages {
-					fmt.Println(pkg.Path(), pkg.String(), len(info.Files))
+				files := map[string]*ast.File{}
+				for _, f := range info.Files {
+					_, fname := filepath.Split(s.fsetLoader.File(f.Pos()).Name())
+					files[fname] = f
 				}
-			*/
+				s.paths[relpath].Infos[pkg.Name()] = &LoaderInfo{Files: files, Info: info}
+			}
 
 			// 1) Find all package-level vars and funcs
 			for relpath, packageNames := range m.Packages {
 				for packageName := range packageNames {
-					pkg := s.paths[relpath].Packages[packageName]
+					info := s.paths[relpath].Infos[packageName]
 					vars := map[*ast.ValueSpec]bool{}
-					for fpath, file := range pkg.Files {
+
+					for fname, file := range info.Files {
 						//_, fname := filepath.Split(fpath)
 						f := func(c *astutil.Cursor) bool {
 							switch n := c.Node().(type) {
@@ -104,9 +146,9 @@ func (m Libify) Apply(s *Session) Applier {
 						}
 						result := astutil.Apply(file, f, nil)
 						if result == nil {
-							pkg.Files[fpath] = nil
+							info.Files[fname] = nil
 						} else {
-							pkg.Files[fpath] = result.(*ast.File)
+							info.Files[fname] = result.(*ast.File)
 						}
 					}
 
@@ -125,6 +167,22 @@ func (m Libify) Apply(s *Session) Applier {
 						// if spec.Type is nil, we must separate the name / value pairs and guess the
 						// types from the values (e.g. var a, b = "a", 1)
 						// TODO: determine type from value (will need to scan with type checker)
+						for i := range spec.Names {
+							name := spec.Names[i]
+							value := spec.Values[i]
+							infoType := info.Info.Types[value]
+							if infoType.Type == nil {
+								panic("no type for " + name.Name + " in " + relpath)
+							}
+							typ := typeToAstTypeSpec(infoType.Type)
+
+							name.Name += "_foo"
+							f := &ast.Field{
+								Names: []*ast.Ident{name},
+								Type:  typ,
+							}
+							fields = append(fields, f)
+						}
 
 						/*
 							t := spec.
@@ -190,7 +248,7 @@ func (m Libify) Apply(s *Session) Applier {
 							},
 						},
 					}
-					pkg.Files["package-session.go"] = f
+					info.Files["package-session.go"] = f
 				}
 
 				// TODO: vars
@@ -206,7 +264,7 @@ func (m Libify) Apply(s *Session) Applier {
 	}
 }
 
-func buildContext(gorootfs, gopathfs billy.Filesystem, tags ...string) *build.Context {
+func buildContext(gorootfs, gopathfs billy.Filesystem, gopathrel string, tags ...string) *build.Context {
 	b := &build.Context{
 		GOARCH:      build.Default.GOARCH, // Target architecture
 		GOOS:        build.Default.GOOS,   // Target operating system
@@ -220,8 +278,8 @@ func buildContext(gorootfs, gopathfs billy.Filesystem, tags ...string) *build.Co
 		// IsDir reports whether the path names a directory.
 		// If IsDir is nil, Import calls os.Stat and uses the result's IsDir method.
 		IsDir: func(path string) bool {
-			newpath, fs := filesystem(path, gorootfs, gopathfs)
-			fi, err := fs.Stat(newpath)
+			fs := filesystem(path, gorootfs, gopathfs, gopathrel)
+			fi, err := fs.Stat(path)
 			return err == nil && fi.IsDir()
 		},
 
@@ -250,33 +308,95 @@ func buildContext(gorootfs, gopathfs billy.Filesystem, tags ...string) *build.Co
 		// describing the content of the named directory.
 		// If ReadDir is nil, Import uses ioutil.ReadDir.
 		ReadDir: func(dir string) ([]os.FileInfo, error) {
-			newdir, fs := filesystem(dir, gorootfs, gopathfs)
-			return fs.ReadDir(newdir)
+			fs := filesystem(dir, gorootfs, gopathfs, gopathrel)
+			return fs.ReadDir(dir)
 		},
 
 		// OpenFile opens a file (not a directory) for reading.
 		// If OpenFile is nil, Import uses os.Open.
 		OpenFile: func(path string) (io.ReadCloser, error) {
-			dir, fname := filepath.Split(path)
-			newdir, fs := filesystem(dir, gorootfs, gopathfs)
-			return fs.Open(filepath.Join(newdir, fname))
+			dir, _ := filepath.Split(path)
+			fs := filesystem(dir, gorootfs, gopathfs, gopathrel)
+			return fs.Open(path)
 		},
 	}
 	return b
 }
 
 // Gets either sourcefs, rootfs or pathfs depending on the path, and if the package is part of source
-func filesystem(dir string, gorootfs, gopathfs billy.Filesystem) (string, billy.Filesystem) {
+func filesystem(dir string, gorootfs, gopathfs billy.Filesystem, gopathrel string) billy.Filesystem {
 
 	dir = strings.Trim(filepath.Clean(dir), string(filepath.Separator))
 	parts := strings.Split(dir, string(filepath.Separator))
 
 	switch parts[0] {
 	case "gopath":
-		return filepath.Join(parts[1:]...), gopathfs
+		return gopathfs
 	case "goroot":
-		return filepath.Join(parts[1:]...), gorootfs
+		return gorootfs
 	}
 
 	panic(fmt.Sprintf("Top dir should be goroot or gopath, got %s", dir))
+}
+
+// Expr for TypeSpec.Type: Should return *Ident, *ParenExpr, *SelectorExpr, *StarExpr, or any of the *XxxTypes
+func typeToAstTypeSpec(t types.Type) ast.Expr {
+	switch t := t.(type) {
+	case *types.Basic:
+		switch t.Kind() {
+		case types.Bool, types.Int, types.Int8, types.Int16, types.Int32, types.Int64, types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr, types.Float32, types.Float64, types.Complex64, types.Complex128, types.String:
+			return ast.NewIdent(t.Name())
+		case types.UnsafePointer:
+			panic("TODO: types.UnsafePointer not implemented")
+		case types.UntypedBool:
+			return ast.NewIdent("bool")
+		case types.UntypedInt:
+			return ast.NewIdent("int")
+		case types.UntypedRune:
+			return ast.NewIdent("rune")
+		case types.UntypedFloat:
+			return ast.NewIdent("float64")
+		case types.UntypedComplex:
+			return ast.NewIdent("complex64")
+		case types.UntypedString:
+			return ast.NewIdent("string")
+		case types.UntypedNil:
+			panic("TODO: types.UntypedNil not implemented")
+		}
+	case *types.Array:
+		return &ast.ArrayType{
+			Len: &ast.BasicLit{
+				Kind:  token.INT,
+				Value: fmt.Sprint(t.Len()),
+			},
+			Elt: typeToAstTypeSpec(t.Elem()),
+		}
+	case *types.Slice:
+		return &ast.ArrayType{
+			Elt: typeToAstTypeSpec(t.Elem()),
+		}
+	case *types.Struct:
+		var fields []*ast.Field
+		for i := 0; i < t.NumFields(); i++ {
+			f := &ast.Field{
+				Names: []*ast.Ident{ast.NewIdent(t.Field(i).Name())},
+				Type:  typeToAstTypeSpec(t.Field(i).Type()),
+			}
+			fields = append(fields, f)
+		}
+		return &ast.StructType{
+			Fields: &ast.FieldList{
+				List: fields,
+			},
+		}
+
+	case *types.Pointer:
+	case *types.Tuple:
+	case *types.Signature:
+	case *types.Interface:
+	case *types.Map:
+	case *types.Chan:
+	case *types.Named:
+	}
+	return ast.NewIdent("TODO")
 }

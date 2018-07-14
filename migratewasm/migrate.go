@@ -101,9 +101,10 @@ var Default = []migraty.Mutator{
 
 	// All tests pass now!
 
-	//migraty.Libify{
-	//	map[string]map[string]bool{
-	//		"src/cmd/compile/internal/gc": {"gc": true},
-	//	},
-	//},
+	migraty.Libify{
+		Root: destinationPath,
+		Packages: map[string]map[string]bool{
+			"src/cmd/compile/internal/gc": {"gc": true},
+		},
+	},
 }

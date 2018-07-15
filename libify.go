@@ -16,8 +16,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dave/services/asthelpers"
 	"github.com/dave/services/fsutil"
+	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
 	"gopkg.in/src-d/go-billy.v4"
@@ -216,7 +216,7 @@ func (m Libify) Apply(s *Session) Applier {
 						*/
 					}
 
-					asthelpers.RefreshImports(f)
+					progutils.RefreshImports(f)
 
 					// 3) Add a PackageSession struct with those fields and methods
 					f.Decls = append(f.Decls, &ast.GenDecl{

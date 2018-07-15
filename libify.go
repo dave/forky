@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dave/services/asthelpers"
 	"github.com/dave/services/fsutil"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
@@ -25,7 +26,6 @@ import (
 
 type Libify struct {
 	Packages map[string]map[string]bool // package path -> package name -> true
-	Root     string
 }
 
 func (m Libify) Apply(s *Session) Applier {
@@ -45,7 +45,7 @@ func (m Libify) Apply(s *Session) Applier {
 							continue
 						}
 
-						rootrelfpath := filepath.Join("gopath", "src", m.Root, relpath, fname)
+						rootrelfpath := filepath.Join("gopath", "src", s.destination, relpath, fname)
 
 						buf := &bytes.Buffer{}
 						if err := format.Node(buf, s.fset, file); err != nil {
@@ -59,25 +59,26 @@ func (m Libify) Apply(s *Session) Applier {
 				}
 			}
 
-			bc := buildContext(s.gorootfs, gopathfs, m.Root)
+			bc := buildContext(s.gorootfs, gopathfs, s.destination)
 			lc := loader.Config{
 				ParserMode: parser.ParseComments,
 				Fset:       s.fset,
 				Build:      bc,
 				Cwd:        "/",
 			}
-			for relpath := range m.Packages {
-				lc.Import(path.Join(m.Root, relpath))
+			for relpath, pathInfo := range s.paths {
+				if len(pathInfo.Packages) == 0 {
+					continue
+				}
+				lc.Import(path.Join(s.destination, relpath))
 			}
 			p, err := lc.Load()
 			if err != nil {
 				panic(err)
 			}
 			s.prog = p
-			s.packageNames = map[string]string{}
 			for pkg, info := range p.AllPackages {
-				s.packageNames[pkg.Path()] = pkg.Name()
-				relpath := strings.TrimPrefix(pkg.Path(), m.Root+"/")
+				relpath := strings.TrimPrefix(pkg.Path(), s.destination+"/")
 				if s.paths[relpath] == nil || s.paths[relpath].Packages[pkg.Name()] == nil {
 					// only update packages that exist in s.paths (in infos we also have std lib etc).
 					continue
@@ -163,7 +164,16 @@ func (m Libify) Apply(s *Session) Applier {
 
 					// make a list of *ast.Field corresponding to the names and types of the deleted vars
 					var fields []*ast.Field
+					type valueItem struct {
+						name  string
+						value ast.Expr
+					}
+					var values []valueItem
 					for spec := range vars {
+						for i, v := range spec.Values {
+							// save any values
+							values = append(values, valueItem{name: spec.Names[i].Name, value: v})
+						}
 						if spec.Type != nil {
 							// if a type is specified, we can add the names as one field
 							infoType := info.Info.Types[spec.Type]
@@ -172,7 +182,7 @@ func (m Libify) Apply(s *Session) Applier {
 							}
 							f := &ast.Field{
 								Names: spec.Names,
-								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(m.Root, relpath), f),
+								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
 							}
 							fields = append(fields, f)
 							continue
@@ -188,7 +198,7 @@ func (m Libify) Apply(s *Session) Applier {
 							}
 							f := &ast.Field{
 								Names: []*ast.Ident{name},
-								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(m.Root, relpath), f),
+								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
 							}
 							fields = append(fields, f)
 						}
@@ -206,69 +216,62 @@ func (m Libify) Apply(s *Session) Applier {
 						*/
 					}
 
-					var importGenDecl *ast.GenDecl
-					if len(f.Imports) > 0 {
-						var importSpecs []ast.Spec
-						for _, is := range f.Imports {
-							importSpecs = append(importSpecs, is)
-						}
-						importGenDecl = &ast.GenDecl{
-							Tok:    token.IMPORT,
-							Lparen: token.Pos(1), // must be non-zero to render as a list
-							Specs:  importSpecs,
-							Rparen: token.Pos(1), // must be non-zero to render as a list
-						}
+					asthelpers.RefreshImports(f)
+
+					// 3) Add a PackageSession struct with those fields and methods
+					f.Decls = append(f.Decls, &ast.GenDecl{
+						Tok: token.TYPE,
+						Specs: []ast.Spec{
+							&ast.TypeSpec{
+								Name: ast.NewIdent("PackageSession"),
+								Type: &ast.StructType{
+									Fields: &ast.FieldList{
+										List: fields,
+									},
+								},
+							},
+						},
+					})
+
+					var valuesList []ast.Expr
+					for _, v := range values {
+						valuesList = append(valuesList, &ast.KeyValueExpr{
+							Key:   ast.NewIdent(v.name),
+							Value: v.value,
+						})
 					}
 
-					// 3) Add a Package struct with those fields and methods
-					f.Decls = []ast.Decl{
-						importGenDecl,
-						&ast.GenDecl{
-							Tok: token.TYPE,
-							Specs: []ast.Spec{
-								&ast.TypeSpec{
-									Name: ast.NewIdent("PackageSession"),
-									Type: &ast.StructType{
-										Fields: &ast.FieldList{
-											List: fields,
+					// Add NewPackageSession function with initialisation logic
+					f.Decls = append(f.Decls, &ast.FuncDecl{
+						Name: ast.NewIdent("NewPackageSession"),
+						Type: &ast.FuncType{
+							Params: &ast.FieldList{},
+							Results: &ast.FieldList{
+								List: []*ast.Field{
+									{
+										Type: &ast.StarExpr{
+											X: ast.NewIdent("PackageSession"),
 										},
 									},
 								},
 							},
 						},
-						&ast.FuncDecl{
-							Name: ast.NewIdent("NewPackageSession"),
-							Type: &ast.FuncType{
-								Params: &ast.FieldList{},
-								Results: &ast.FieldList{
-									List: []*ast.Field{
-										{
-											Type: &ast.StarExpr{
-												X: ast.NewIdent("PackageSession"),
-											},
-										},
-									},
-								},
-							},
-							Body: &ast.BlockStmt{
-								List: []ast.Stmt{
-									&ast.ReturnStmt{
-										Results: []ast.Expr{
-											&ast.UnaryExpr{
-												Op: token.AND,
-												X: &ast.CompositeLit{
-													Type: ast.NewIdent("PackageSession"),
-													Elts: []ast.Expr{
-													// TODO: Elements
-													},
-												},
+						Body: &ast.BlockStmt{
+							List: []ast.Stmt{
+								&ast.ReturnStmt{
+									Results: []ast.Expr{
+										&ast.UnaryExpr{
+											Op: token.AND,
+											X: &ast.CompositeLit{
+												Type: ast.NewIdent("PackageSession"),
+												Elts: valuesList,
 											},
 										},
 									},
 								},
 							},
 						},
-					}
+					})
 
 					info.Files["package-session.go"] = f
 				}
@@ -507,13 +510,12 @@ func (s *Session) typeToAstTypeSpec(t types.Type, path string, f *ast.File) ast.
 				Path: &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(t.Obj().Pkg().Path())},
 			})
 		}
-		// look up the name of the package
-		name, ok := s.packageNames[t.Obj().Pkg().Path()]
-		if !ok {
+		pkg := s.prog.Package(t.Obj().Pkg().Path())
+		if pkg == nil {
 			panic(fmt.Sprintf("package %s not found", t.Obj().Pkg().Path()))
 		}
 		return &ast.SelectorExpr{
-			X:   ast.NewIdent(name),
+			X:   ast.NewIdent(pkg.Pkg.Name()),
 			Sel: ast.NewIdent(t.Obj().Name()),
 		}
 	}

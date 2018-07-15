@@ -26,33 +26,33 @@ import (
 )
 
 type Session struct {
-	fs           billy.Filesystem
-	gorootfs     billy.Filesystem
-	fset         *token.FileSet
-	root         string               // root path
-	paths        map[string]*PathInfo // relative path from root -> path info (may include several packages)
-	gopathsrc    string
-	out          io.Writer
-	ParseFilter  func(relpath string, file os.FileInfo) bool
-	prog         *loader.Program
-	packageNames map[string]string // package path -> package name
+	fs                  billy.Filesystem
+	gorootfs            billy.Filesystem
+	fset                *token.FileSet
+	source, destination string               // root path of source and destination
+	paths               map[string]*PathInfo // relative path from root -> path info (may include several packages)
+	gopathsrc           string
+	out                 io.Writer
+	ParseFilter         func(relpath string, file os.FileInfo) bool
+	prog                *loader.Program
 }
 
-func NewSession(rootpath string) *Session {
+func NewSession(source, destination string) *Session {
 	return &Session{
-		fs:        osfs.New("/"),
-		gorootfs:  polyfill.New(mount.New(memfs.New(), "/goroot", osfs.New(build.Default.GOROOT))),
-		gopathsrc: filepath.Join(build.Default.GOPATH, "src"),
-		fset:      token.NewFileSet(),
-		root:      rootpath,
-		paths:     map[string]*PathInfo{},
-		out:       os.Stdout,
+		fs:          osfs.New("/"),
+		gorootfs:    polyfill.New(mount.New(memfs.New(), "/goroot", osfs.New(build.Default.GOROOT))),
+		gopathsrc:   filepath.Join(build.Default.GOPATH, "src"),
+		fset:        token.NewFileSet(),
+		source:      source,
+		destination: destination,
+		paths:       map[string]*PathInfo{},
+		out:         os.Stdout,
 	}
 }
 
 func (s *Session) Run(mutations []Mutator) error {
 
-	rootDir := filepath.Join(s.gopathsrc, s.root)
+	rootDir := filepath.Join(s.gopathsrc, s.source)
 
 	var appliers []Applier
 	for _, mutation := range mutations {
@@ -175,7 +175,7 @@ func (s *Session) parse(files map[string]map[string]bool, rootDir string) error 
 		fmt.Fprintf(s.out, "\rParsing: %d/%d", count, len(files))
 
 		dir := filepath.Join(rootDir, relpath)
-		path := dirToPath(filepath.Join(s.root, relpath))
+		path := dirToPath(filepath.Join(s.source, relpath))
 
 		info := &PathInfo{
 			Dir:      dir,
@@ -202,20 +202,41 @@ func (s *Session) parse(files map[string]map[string]bool, rootDir string) error 
 			return err
 		}
 
+		var name string
 		packages := map[string]*PackageInfo{} // package name -> file name -> ast file
+		var hasFiles bool
 		for pkgname, pkg := range astpackages {
-			packages[pkgname] = &PackageInfo{Files: map[string]*ast.File{}}
+			packages[pkgname] = &PackageInfo{Name: pkgname, Files: map[string]*ast.File{}}
+			if strings.HasSuffix(pkgname, "_test") {
+				if name == "" {
+					name = pkgname // only set name to x_test if it doesn't already have a value
+				}
+			} else if pkgname == "main" {
+				if name == "" || strings.HasSuffix(pkgname, "_test") {
+					name = pkgname // only set name to main if it doesn't already have a value, or is a test package
+				}
+			} else {
+				name = pkgname
+			}
+
 			for fpath, file := range pkg.Files {
+				hasFiles = true
 				_, fname := filepath.Split(fpath)
 				packages[pkgname].Files[fname] = file
 			}
+		}
+		if name == "" && hasFiles {
+			panic("no name for " + relpath)
+		}
+		if name != "" {
+			info.Default = packages[name]
 		}
 
 		// Manipulating the AST breaks "lossy" comments - e.g. comments not attached to a node. They
 		// end up being rendered in the wrong place which breaks things. I don't think there's any other
 		// option right now except deleting them all.
-		for _, files := range packages {
-			for _, f := range files.Files {
+		for _, pkgInfo := range packages {
+			for _, f := range pkgInfo.Files {
 				comments := map[*ast.CommentGroup]bool{}
 				ast.Inspect(f, func(n ast.Node) bool {
 					switch n := n.(type) {
@@ -312,7 +333,7 @@ func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (s *Session) Save(path string) error {
+func (s *Session) Save() error {
 	tempfs := memfs.New()
 
 	var count int
@@ -341,14 +362,14 @@ func (s *Session) Save(path string) error {
 		}
 		// extras
 		for fname := range pathInfo.Extras {
-			from := filepath.Join(s.gopathsrc, s.root, relpath, fname)
+			from := filepath.Join(s.gopathsrc, s.source, relpath, fname)
 			to := filepath.Join(relpath, fname)
 			if err := fsutil.Copy(tempfs, to, s.fs, from); err != nil {
 				return err
 			}
 		}
 	}
-	destinationDir := filepath.Join(s.gopathsrc, path)
+	destinationDir := filepath.Join(s.gopathsrc, s.destination)
 	if err := removeContents(s.fs, destinationDir); err != nil {
 		return err
 	}
@@ -386,11 +407,13 @@ type PathInfo struct {
 	Dir      string
 	Path     string                  // full go path
 	Relpath  string                  // go path relative to root
+	Default  *PackageInfo            // default package (e.g. not x_test or main)
 	Packages map[string]*PackageInfo // all named packages in dir - e.g. foo, foo_test, main: package name -> package info
 	Extras   map[string]bool         // filenames of all files not included in packages (non-go files, filtered go files etc.)
 }
 
 type PackageInfo struct {
+	Name  string
 	Files map[string]*ast.File // file name -> ast file
 	Info  *loader.PackageInfo
 }

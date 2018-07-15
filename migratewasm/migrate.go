@@ -18,16 +18,19 @@ func main() {
 }
 
 func run() error {
-	s := migraty.NewSession("go.googlesource.com/go")
+	s := migraty.NewSession("go.googlesource.com/go", destinationPath)
 
 	s.ParseFilter = func(relpath string, file os.FileInfo) bool {
-		return strings.HasPrefix(relpath, "src/") && !strings.Contains(relpath, "/testdata/")
+		if strings.Contains(relpath, "/testdata/") || strings.HasSuffix(relpath, "/testdata") {
+			return false
+		}
+		return strings.HasPrefix(relpath, "src/")
 	}
 
 	if err := s.Run(Default); err != nil {
 		return err
 	}
-	if err := s.Save(destinationPath); err != nil {
+	if err := s.Save(); err != nil {
 		return err
 	}
 	return nil
@@ -102,7 +105,6 @@ var Default = []migraty.Mutator{
 	// All tests pass now!
 
 	migraty.Libify{
-		Root: destinationPath,
 		Packages: map[string]map[string]bool{
 			"src/cmd/compile/internal/gc": {"gc": true},
 		},

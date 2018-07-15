@@ -39,7 +39,7 @@ func (m Libify) Apply(s *Session) Applier {
 				fmt.Fprintf(s.out, "\rScanning: %d/%d", count+1, len(s.paths))
 				count++
 				for _, pkg := range info.Packages {
-					for fname, file := range pkg {
+					for fname, file := range pkg.Files {
 
 						if file == nil {
 							continue
@@ -48,7 +48,7 @@ func (m Libify) Apply(s *Session) Applier {
 						rootrelfpath := filepath.Join("gopath", "src", m.Root, relpath, fname)
 
 						buf := &bytes.Buffer{}
-						if err := format.Node(buf, s.fsetAst, file); err != nil {
+						if err := format.Node(buf, s.fset, file); err != nil {
 							panic(fmt.Errorf("format.Node error in %s: %v", rootrelfpath, err))
 						}
 
@@ -62,7 +62,7 @@ func (m Libify) Apply(s *Session) Applier {
 			bc := buildContext(s.gorootfs, gopathfs, m.Root)
 			lc := loader.Config{
 				ParserMode: parser.ParseComments,
-				Fset:       s.fsetLoader,
+				Fset:       s.fset,
 				Build:      bc,
 				Cwd:        "/",
 			}
@@ -78,22 +78,23 @@ func (m Libify) Apply(s *Session) Applier {
 			for pkg, info := range p.AllPackages {
 				s.packageNames[pkg.Path()] = pkg.Name()
 				relpath := strings.TrimPrefix(pkg.Path(), m.Root+"/")
-				if s.paths[relpath] == nil {
+				if s.paths[relpath] == nil || s.paths[relpath].Packages[pkg.Name()] == nil {
 					// only update packages that exist in s.paths (in infos we also have std lib etc).
 					continue
 				}
 				files := map[string]*ast.File{}
 				for _, f := range info.Files {
-					_, fname := filepath.Split(s.fsetLoader.File(f.Pos()).Name())
+					_, fname := filepath.Split(s.fset.File(f.Pos()).Name())
 					files[fname] = f
 				}
-				s.paths[relpath].Infos[pkg.Name()] = &LoaderInfo{Files: files, Info: info}
+				s.paths[relpath].Packages[pkg.Name()].Files = files
+				s.paths[relpath].Packages[pkg.Name()].Info = info
 			}
 
 			// 1) Find all package-level vars and funcs
 			for relpath, packageNames := range m.Packages {
 				for packageName := range packageNames {
-					info := s.paths[relpath].Infos[packageName]
+					info := s.paths[relpath].Packages[packageName]
 					vars := map[*ast.ValueSpec]bool{}
 
 					for fname, file := range info.Files {

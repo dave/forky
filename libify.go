@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dave/services/fsutil"
@@ -72,7 +73,10 @@ func (m Libify) Apply(s *Session) Applier {
 			if err != nil {
 				panic(err)
 			}
+			s.prog = p
+			s.packageNames = map[string]string{}
 			for pkg, info := range p.AllPackages {
+				s.packageNames[pkg.Path()] = pkg.Name()
 				relpath := strings.TrimPrefix(pkg.Path(), m.Root+"/")
 				if s.paths[relpath] == nil {
 					// only update packages that exist in s.paths (in infos we also have std lib etc).
@@ -152,20 +156,27 @@ func (m Libify) Apply(s *Session) Applier {
 						}
 					}
 
+					f := &ast.File{
+						Name: ast.NewIdent(packageName),
+					}
+
 					// make a list of *ast.Field corresponding to the names and types of the deleted vars
 					var fields []*ast.Field
 					for spec := range vars {
 						if spec.Type != nil {
 							// if a type is specified, we can add the names as one field
+							infoType := info.Info.Types[spec.Type]
+							if infoType.Type == nil {
+								panic(fmt.Sprintf("no type for %v in %s", spec.Names, relpath))
+							}
 							f := &ast.Field{
 								Names: spec.Names,
-								Type:  spec.Type,
+								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(m.Root, relpath), f),
 							}
 							fields = append(fields, f)
 							continue
 						}
-						// if spec.Type is nil, we must separate the name / value pairs and guess the
-						// types from the values (e.g. var a, b = "a", 1)
+						// if spec.Type is nil, we must separate the name / value pairs
 						// TODO: determine type from value (will need to scan with type checker)
 						for i := range spec.Names {
 							name := spec.Names[i]
@@ -174,12 +185,9 @@ func (m Libify) Apply(s *Session) Applier {
 							if infoType.Type == nil {
 								panic("no type for " + name.Name + " in " + relpath)
 							}
-							typ := typeToAstTypeSpec(infoType.Type)
-
-							name.Name += "_foo"
 							f := &ast.Field{
 								Names: []*ast.Ident{name},
-								Type:  typ,
+								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(m.Root, relpath), f),
 							}
 							fields = append(fields, f)
 						}
@@ -197,48 +205,60 @@ func (m Libify) Apply(s *Session) Applier {
 						*/
 					}
 
+					var importGenDecl *ast.GenDecl
+					if len(f.Imports) > 0 {
+						var importSpecs []ast.Spec
+						for _, is := range f.Imports {
+							importSpecs = append(importSpecs, is)
+						}
+						importGenDecl = &ast.GenDecl{
+							Tok:    token.IMPORT,
+							Lparen: token.Pos(1), // must be non-zero to render as a list
+							Specs:  importSpecs,
+							Rparen: token.Pos(1), // must be non-zero to render as a list
+						}
+					}
+
 					// 3) Add a Package struct with those fields and methods
-					f := &ast.File{
-						Name: ast.NewIdent(packageName),
-						Decls: []ast.Decl{
-							&ast.GenDecl{
-								Tok: token.TYPE,
-								Specs: []ast.Spec{
-									&ast.TypeSpec{
-										Name: ast.NewIdent("PackageSession"),
-										Type: &ast.StructType{
-											Fields: &ast.FieldList{
-												List: fields,
+					f.Decls = []ast.Decl{
+						importGenDecl,
+						&ast.GenDecl{
+							Tok: token.TYPE,
+							Specs: []ast.Spec{
+								&ast.TypeSpec{
+									Name: ast.NewIdent("PackageSession"),
+									Type: &ast.StructType{
+										Fields: &ast.FieldList{
+											List: fields,
+										},
+									},
+								},
+							},
+						},
+						&ast.FuncDecl{
+							Name: ast.NewIdent("NewPackageSession"),
+							Type: &ast.FuncType{
+								Params: &ast.FieldList{},
+								Results: &ast.FieldList{
+									List: []*ast.Field{
+										{
+											Type: &ast.StarExpr{
+												X: ast.NewIdent("PackageSession"),
 											},
 										},
 									},
 								},
 							},
-							&ast.FuncDecl{
-								Name: ast.NewIdent("NewPackageSession"),
-								Type: &ast.FuncType{
-									Params: &ast.FieldList{},
-									Results: &ast.FieldList{
-										List: []*ast.Field{
-											{
-												Type: &ast.StarExpr{
-													X: ast.NewIdent("PackageSession"),
-												},
-											},
-										},
-									},
-								},
-								Body: &ast.BlockStmt{
-									List: []ast.Stmt{
-										&ast.ReturnStmt{
-											Results: []ast.Expr{
-												&ast.UnaryExpr{
-													Op: token.AND,
-													X: &ast.CompositeLit{
-														Type: ast.NewIdent("PackageSession"),
-														Elts: []ast.Expr{
-														// TODO: Elements
-														},
+							Body: &ast.BlockStmt{
+								List: []ast.Stmt{
+									&ast.ReturnStmt{
+										Results: []ast.Expr{
+											&ast.UnaryExpr{
+												Op: token.AND,
+												X: &ast.CompositeLit{
+													Type: ast.NewIdent("PackageSession"),
+													Elts: []ast.Expr{
+													// TODO: Elements
 													},
 												},
 											},
@@ -248,6 +268,7 @@ func (m Libify) Apply(s *Session) Applier {
 							},
 						},
 					}
+
 					info.Files["package-session.go"] = f
 				}
 
@@ -340,7 +361,7 @@ func filesystem(dir string, gorootfs, gopathfs billy.Filesystem, gopathrel strin
 }
 
 // Expr for TypeSpec.Type: Should return *Ident, *ParenExpr, *SelectorExpr, *StarExpr, or any of the *XxxTypes
-func typeToAstTypeSpec(t types.Type) ast.Expr {
+func (s *Session) typeToAstTypeSpec(t types.Type, path string, f *ast.File) ast.Expr {
 	switch t := t.(type) {
 	case *types.Basic:
 		switch t.Kind() {
@@ -369,18 +390,18 @@ func typeToAstTypeSpec(t types.Type) ast.Expr {
 				Kind:  token.INT,
 				Value: fmt.Sprint(t.Len()),
 			},
-			Elt: typeToAstTypeSpec(t.Elem()),
+			Elt: s.typeToAstTypeSpec(t.Elem(), path, f),
 		}
 	case *types.Slice:
 		return &ast.ArrayType{
-			Elt: typeToAstTypeSpec(t.Elem()),
+			Elt: s.typeToAstTypeSpec(t.Elem(), path, f),
 		}
 	case *types.Struct:
 		var fields []*ast.Field
 		for i := 0; i < t.NumFields(); i++ {
 			f := &ast.Field{
 				Names: []*ast.Ident{ast.NewIdent(t.Field(i).Name())},
-				Type:  typeToAstTypeSpec(t.Field(i).Type()),
+				Type:  s.typeToAstTypeSpec(t.Field(i).Type(), path, f),
 			}
 			fields = append(fields, f)
 		}
@@ -391,12 +412,109 @@ func typeToAstTypeSpec(t types.Type) ast.Expr {
 		}
 
 	case *types.Pointer:
+		return &ast.StarExpr{
+			X: s.typeToAstTypeSpec(t.Elem(), path, f),
+		}
 	case *types.Tuple:
+		panic("tuple?")
 	case *types.Signature:
+		params := &ast.FieldList{}
+		for i := 0; i < t.Params().Len(); i++ {
+			f := &ast.Field{
+				Names: []*ast.Ident{ast.NewIdent(t.Params().At(i).Name())},
+				Type:  s.typeToAstTypeSpec(t.Params().At(i).Type(), path, f),
+			}
+			params.List = append(params.List, f)
+		}
+		var results *ast.FieldList
+		if t.Results().Len() > 0 {
+			results = &ast.FieldList{}
+			for i := 0; i < t.Results().Len(); i++ {
+				f := &ast.Field{
+					Names: []*ast.Ident{ast.NewIdent(t.Results().At(i).Name())},
+					Type:  s.typeToAstTypeSpec(t.Results().At(i).Type(), path, f),
+				}
+				results.List = append(results.List, f)
+			}
+		}
+		return &ast.FuncType{
+			Params:  params,
+			Results: results,
+		}
 	case *types.Interface:
+		methods := &ast.FieldList{}
+		for i := 0; i < t.NumEmbeddeds(); i++ {
+			f := &ast.Field{
+				Type: s.typeToAstTypeSpec(t.Embedded(i), path, f),
+			}
+			methods.List = append(methods.List, f)
+		}
+		for i := 0; i < t.NumExplicitMethods(); i++ {
+			f := &ast.Field{
+				Names: []*ast.Ident{ast.NewIdent(t.ExplicitMethod(i).Name())},
+				Type:  s.typeToAstTypeSpec(t.ExplicitMethod(i).Type(), path, f),
+			}
+			methods.List = append(methods.List, f)
+		}
+
+		return &ast.InterfaceType{
+			Methods: methods,
+		}
 	case *types.Map:
+		return &ast.MapType{
+			Key:   s.typeToAstTypeSpec(t.Key(), path, f),
+			Value: s.typeToAstTypeSpec(t.Elem(), path, f),
+		}
 	case *types.Chan:
+		var dir ast.ChanDir
+		switch t.Dir() {
+		case types.SendOnly:
+			dir = ast.SEND
+		case types.RecvOnly:
+			dir = ast.RECV
+		}
+		return &ast.ChanType{
+			Dir:   dir,
+			Value: s.typeToAstTypeSpec(t.Elem(), path, f),
+		}
 	case *types.Named:
+		if t.Obj().Pkg().Path() == path {
+			return ast.NewIdent(t.Obj().Name())
+		}
+		var found bool
+		// lookup package in file imports
+		for _, is := range f.Imports {
+			importpath, err := strconv.Unquote(is.Path.Value)
+			if err != nil {
+				panic(err)
+			}
+			if importpath == t.Obj().Pkg().Path() {
+				if is.Name != nil && is.Name.Name != "" {
+					// if current import is aliased, just use that name
+					return &ast.SelectorExpr{
+						X:   ast.NewIdent(is.Name.Name),
+						Sel: ast.NewIdent(t.Obj().Name()),
+					}
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// if not found, add the import to the ast file imports
+			f.Imports = append(f.Imports, &ast.ImportSpec{
+				Path: &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(t.Obj().Pkg().Path())},
+			})
+		}
+		// look up the name of the package
+		name, ok := s.packageNames[t.Obj().Pkg().Path()]
+		if !ok {
+			panic(fmt.Sprintf("package %s not found", t.Obj().Pkg().Path()))
+		}
+		return &ast.SelectorExpr{
+			X:   ast.NewIdent(name),
+			Sel: ast.NewIdent(t.Obj().Name()),
+		}
 	}
-	return ast.NewIdent("TODO")
+	panic(fmt.Sprintf("unsupported type %T", t))
 }

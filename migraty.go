@@ -34,6 +34,8 @@ type Session struct {
 	gopathsrc           string
 	out                 io.Writer
 	ParseFilter         func(relpath string, file os.FileInfo) bool
+	prog                *loader.Program
+	packageNames        map[string]string // package path -> package name
 }
 
 func NewSession(rootpath string) *Session {

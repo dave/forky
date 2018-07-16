@@ -95,6 +95,9 @@ func (m Libify) Apply(s *Session) Applier {
 			for _, relpath := range m.Packages {
 				info := s.paths[relpath].Default
 				vars := map[*ast.ValueSpec]bool{}
+				varObjects := map[types.Object]bool{}
+				funcObjects := map[types.Object]bool{}
+				methodObjects := map[types.Object]bool{}
 
 				for fname, file := range info.Files {
 					//_, fname := filepath.Split(fpath)
@@ -109,8 +112,18 @@ func (m Libify) Apply(s *Session) Applier {
 								return true
 							}
 
-							for _, v := range n.Specs {
-								vars[v.(*ast.ValueSpec)] = true
+							for _, spec := range n.Specs {
+								spec := spec.(*ast.ValueSpec)
+								vars[spec] = true
+
+								// look up the object in the types.Defs
+								for _, id := range spec.Names {
+									def, ok := info.Info.Defs[id]
+									if !ok {
+										panic(fmt.Sprintf("can't find %s in defs", id.Name))
+									}
+									varObjects[def] = true
+								}
 							}
 
 							// remove all package-level var declarations
@@ -129,6 +142,13 @@ func (m Libify) Apply(s *Session) Applier {
 									},
 								}
 								n.Type.Params.List = append([]*ast.Field{psess}, n.Type.Params.List...)
+
+								def, ok := info.Info.Defs[n.Name]
+								if !ok {
+									panic(fmt.Sprintf("can't find %s in defs", n.Name.Name))
+								}
+								methodObjects[def] = true
+
 							} else {
 								// if func, add "psess *PackageSession" as the receiver
 								n.Recv = &ast.FieldList{List: []*ast.Field{
@@ -137,6 +157,11 @@ func (m Libify) Apply(s *Session) Applier {
 										Type:  &ast.StarExpr{X: ast.NewIdent("PackageSession")},
 									},
 								}}
+								def, ok := info.Info.Defs[n.Name]
+								if !ok {
+									panic(fmt.Sprintf("can't find %s in defs", n.Name.Name))
+								}
+								funcObjects[def] = true
 							}
 							c.Replace(n)
 							//if fname == "elf.go" {
@@ -167,17 +192,7 @@ func (m Libify) Apply(s *Session) Applier {
 					value ast.Expr
 				}
 				var values []valueItem
-				objects := map[types.Object]bool{}
 				for spec := range vars {
-
-					// look up the object in the types.Defs
-					for _, id := range spec.Names {
-						def, ok := info.Info.Defs[id]
-						if !ok {
-							panic(fmt.Sprintf("can't find %s in defs", id.Name))
-						}
-						objects[def] = true
-					}
 
 					for i, v := range spec.Values {
 						// save any values
@@ -308,11 +323,28 @@ func (m Libify) Apply(s *Session) Applier {
 							if !ok {
 								return true
 							}
-							if objects[use] {
+							if varObjects[use] || funcObjects[use] {
 								c.Replace(&ast.SelectorExpr{
 									X:   ast.NewIdent("psess"),
 									Sel: n,
 								})
+							}
+						case *ast.CallExpr:
+							var id *ast.Ident
+							switch fun := n.Fun.(type) {
+							case *ast.Ident:
+								id = fun
+							case *ast.SelectorExpr:
+								id = fun.Sel
+							default:
+								return true
+							}
+							use, ok := info.Info.Uses[id]
+							if !ok {
+								return true
+							}
+							if methodObjects[use] {
+								n.Args = append([]ast.Expr{ast.NewIdent("psess")}, n.Args...)
 							}
 						}
 						return true

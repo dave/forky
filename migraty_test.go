@@ -17,32 +17,6 @@ import (
 
 func TestAll(t *testing.T) {
 	tests := map[string]testspec{
-		"libify simple": {
-			files:    `func Foo() {}`,
-			mutators: Libify{map[string]map[string]bool{"a": {"a": true}}},
-			expected: map[string]string{
-				"a.go": `func (psess *PackageSession) Foo() {}`,
-				"package-session.go": `
-					type PackageSession struct {
-					}
-					func NewPackageSession() *PackageSession {
-						return &PackageSession{}
-					}`,
-			},
-		},
-		"libify other methods": {
-			files:    `func (f F) Foo() {}`,
-			mutators: Libify{map[string]map[string]bool{"a": {"a": true}}},
-			expected: map[string]string{
-				"a.go": `func (f F) Foo(psess *PackageSession) {}`,
-				"package-session.go": `
-					type PackageSession struct {
-					}
-					func NewPackageSession() *PackageSession {
-						return &PackageSession{}
-					}`,
-			},
-		},
 		"simple string replace": {
 			files: `var a = "foo"`,
 			mutators: ModifyStrings(func(s string) string {
@@ -53,6 +27,101 @@ func TestAll(t *testing.T) {
 			}),
 			expected: `var a = "bar"`,
 		},
+		"libify simple": {
+			files:    `func Foo() {}`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": `func (psess *PackageSession) Foo() {}`,
+				"package-session.go": `
+					type PackageSession struct {
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						return psess
+					}`,
+			},
+		},
+		"libify other methods": {
+			files:    `type F string; func (f F) Foo() {}`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": `type F string; func (f F) Foo(psess *PackageSession) {}`,
+				"package-session.go": `
+					type PackageSession struct {
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						return psess
+					}`,
+			},
+		},
+		"libify var": {
+			files:    `var i int`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": ``,
+				"package-session.go": `
+					type PackageSession struct {
+						i int
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						return psess
+					}`,
+			},
+		},
+		"libify var init": {
+			files:    `var i = 1`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": ``,
+				"package-session.go": `
+					type PackageSession struct {
+						i int
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						psess.i = 1
+						return psess
+					}`,
+			},
+		},
+		"libify var init order": {
+			files:    `var a = b; var b = 1`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": ``,
+				"package-session.go": `
+					type PackageSession struct {
+						a int
+						b int
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						psess.b = 1
+						psess.a = psess.b
+						return psess
+					}`,
+			},
+		},
+		"libify var func": {
+			skip:     true,
+			files:    `import "fmt"; var a = fmt.Sprint("")`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": `import "fmt"`,
+				"package-session.go": `
+					import "fmt"
+					type PackageSession struct {
+						a string
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						psess.a = fmt.Sprint("")
+						return psess
+					}`,
+			},
+		},
 	}
 
 	single := "" // during dev, set this to the name of a test case to just run that single case
@@ -61,7 +130,12 @@ func TestAll(t *testing.T) {
 		tests = map[string]testspec{single: tests[single]}
 	}
 
+	var skipped bool
 	for _, spec := range tests {
+		if spec.skip {
+			skipped = true
+			continue
+		}
 		if err := runTest(spec); err != nil {
 			t.Fatal(err)
 			return
@@ -71,9 +145,13 @@ func TestAll(t *testing.T) {
 	if single != "" {
 		t.Fatal("test passed, but failed because single mode is set")
 	}
+	if skipped {
+		t.Fatal("test passed, but skipped some")
+	}
 }
 
 type testspec struct {
+	skip     bool
 	name     string
 	files    interface{} // either map[string]map[string]string, map[string]string or string
 	mutators interface{} // either Mutator or []Mutator
@@ -81,7 +159,7 @@ type testspec struct {
 }
 
 func runTest(spec testspec) error {
-	s := NewSession("/")
+	s := NewSession("", "")
 	s.out = &bytes.Buffer{}
 	s.gopathsrc = "/"
 	s.fs = memfs.New()
@@ -126,7 +204,7 @@ func runTest(spec testspec) error {
 	if err := s.Run(mutators); err != nil {
 		return err
 	}
-	if err := s.Save("/"); err != nil {
+	if err := s.Save(); err != nil {
 		return err
 	}
 
@@ -180,25 +258,3 @@ func runTest(spec testspec) error {
 
 	return nil
 }
-
-/*
-	out := map[string]map[string]string{
-		"foo/bar": {
-			"bar.go": ` package bar`,
-			"session.go": `	package bar
-
-							func NewPackage() *Package {
-								return &Package{
-									i: 1,
-								}
-							}
-
-							type Package struct {
-								i int
-							}
-
-							func (p *Package) foo() string {
-								return "foo"
-							}`,
-		},
-	}*/

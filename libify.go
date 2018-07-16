@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/dave/services/fsutil"
@@ -25,7 +24,7 @@ import (
 )
 
 type Libify struct {
-	Packages map[string]map[string]bool // package path -> package name -> true
+	Packages []string // package path -> package name -> true
 }
 
 func (m Libify) Apply(s *Session) Applier {
@@ -93,198 +92,240 @@ func (m Libify) Apply(s *Session) Applier {
 			}
 
 			// 1) Find all package-level vars and funcs
-			for relpath, packageNames := range m.Packages {
-				for packageName := range packageNames {
-					info := s.paths[relpath].Packages[packageName]
-					vars := map[*ast.ValueSpec]bool{}
+			for _, relpath := range m.Packages {
+				info := s.paths[relpath].Default
+				vars := map[*ast.ValueSpec]bool{}
 
-					for fname, file := range info.Files {
-						//_, fname := filepath.Split(fpath)
-						f := func(c *astutil.Cursor) bool {
-							switch n := c.Node().(type) {
-							case *ast.GenDecl:
-								if n.Tok != token.VAR {
-									return true
+				for fname, file := range info.Files {
+					//_, fname := filepath.Split(fpath)
+					f := func(c *astutil.Cursor) bool {
+						switch n := c.Node().(type) {
+						case *ast.GenDecl:
+							if n.Tok != token.VAR {
+								return true
+							}
+							if _, ok := c.Parent().(*ast.DeclStmt); ok {
+								// for vars inside functions
+								return true
+							}
+
+							for _, v := range n.Specs {
+								vars[v.(*ast.ValueSpec)] = true
+							}
+
+							// remove all package-level var declarations
+							c.Delete()
+
+						case *ast.FuncDecl:
+
+							isMethod := n.Recv != nil && len(n.Recv.List) > 0
+
+							if isMethod {
+								// if method, add "psess *PackageSession" as the first parameter
+								psess := &ast.Field{
+									Names: []*ast.Ident{ast.NewIdent("psess")},
+									Type: &ast.StarExpr{
+										X: ast.NewIdent("PackageSession"),
+									},
 								}
-								if _, ok := c.Parent().(*ast.DeclStmt); ok {
-									// for vars inside functions
-									return true
-								}
-
-								for _, v := range n.Specs {
-									vars[v.(*ast.ValueSpec)] = true
-								}
-
-								// remove all package-level var declarations
-								c.Delete()
-
-							case *ast.FuncDecl:
-
-								isMethod := n.Recv != nil && len(n.Recv.List) > 0
-
-								if isMethod {
-									// if method, add "psess *PackageSession" as the first parameter
-									psess := &ast.Field{
-										Names: []*ast.Ident{ast.NewIdent("psess")},
-										Type: &ast.StarExpr{
-											X: ast.NewIdent("PackageSession"),
-										},
-									}
-									n.Type.Params.List = append([]*ast.Field{psess}, n.Type.Params.List...)
-								} else {
-									// if func, add "psess *PackageSession" as the receiver
-									n.Recv = &ast.FieldList{List: []*ast.Field{
-										{
-											Names: []*ast.Ident{ast.NewIdent("psess")},
-											Type:  &ast.StarExpr{X: ast.NewIdent("PackageSession")},
-										},
-									}}
-								}
-								c.Replace(n)
-								//if fname == "elf.go" {
-								//	fmt.Println("-----------------")
-								//	format.Node(os.Stdout, s.fset, c.Node())
-								//	fmt.Println("-----------------")
-								//}
-
-							}
-							return true
-						}
-						result := astutil.Apply(file, f, nil)
-						if result == nil {
-							info.Files[fname] = nil
-						} else {
-							info.Files[fname] = result.(*ast.File)
-						}
-					}
-
-					f := &ast.File{
-						Name: ast.NewIdent(packageName),
-					}
-
-					// make a list of *ast.Field corresponding to the names and types of the deleted vars
-					var fields []*ast.Field
-					type valueItem struct {
-						name  string
-						value ast.Expr
-					}
-					var values []valueItem
-					for spec := range vars {
-						for i, v := range spec.Values {
-							// save any values
-							values = append(values, valueItem{name: spec.Names[i].Name, value: v})
-						}
-						if spec.Type != nil {
-							// if a type is specified, we can add the names as one field
-							infoType := info.Info.Types[spec.Type]
-							if infoType.Type == nil {
-								panic(fmt.Sprintf("no type for %v in %s", spec.Names, relpath))
-							}
-							f := &ast.Field{
-								Names: spec.Names,
-								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
-							}
-							fields = append(fields, f)
-							continue
-						}
-						// if spec.Type is nil, we must separate the name / value pairs
-						// TODO: determine type from value (will need to scan with type checker)
-						for i := range spec.Names {
-							name := spec.Names[i]
-							value := spec.Values[i]
-							infoType := info.Info.Types[value]
-							if infoType.Type == nil {
-								panic("no type for " + name.Name + " in " + relpath)
-							}
-							f := &ast.Field{
-								Names: []*ast.Ident{name},
-								Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
-							}
-							fields = append(fields, f)
-						}
-
-						/*
-							t := spec.
-							if t == nil {
-								t = getType()
-							}
-							if len(spec.Names) > 0 && spec.Type != nil {
-
+								n.Type.Params.List = append([]*ast.Field{psess}, n.Type.Params.List...)
 							} else {
-								fmt.Println(spec.Names, spec.Type)
-							}
-						*/
-					}
-
-					progutils.RefreshImports(f)
-
-					// 3) Add a PackageSession struct with those fields and methods
-					f.Decls = append(f.Decls, &ast.GenDecl{
-						Tok: token.TYPE,
-						Specs: []ast.Spec{
-							&ast.TypeSpec{
-								Name: ast.NewIdent("PackageSession"),
-								Type: &ast.StructType{
-									Fields: &ast.FieldList{
-										List: fields,
-									},
-								},
-							},
-						},
-					})
-
-					var valuesList []ast.Expr
-					for _, v := range values {
-						valuesList = append(valuesList, &ast.KeyValueExpr{
-							Key:   ast.NewIdent(v.name),
-							Value: v.value,
-						})
-					}
-
-					// Add NewPackageSession function with initialisation logic
-					f.Decls = append(f.Decls, &ast.FuncDecl{
-						Name: ast.NewIdent("NewPackageSession"),
-						Type: &ast.FuncType{
-							Params: &ast.FieldList{},
-							Results: &ast.FieldList{
-								List: []*ast.Field{
+								// if func, add "psess *PackageSession" as the receiver
+								n.Recv = &ast.FieldList{List: []*ast.Field{
 									{
-										Type: &ast.StarExpr{
-											X: ast.NewIdent("PackageSession"),
-										},
+										Names: []*ast.Ident{ast.NewIdent("psess")},
+										Type:  &ast.StarExpr{X: ast.NewIdent("PackageSession")},
 									},
-								},
-							},
-						},
-						Body: &ast.BlockStmt{
-							List: []ast.Stmt{
-								&ast.ReturnStmt{
-									Results: []ast.Expr{
-										&ast.UnaryExpr{
-											Op: token.AND,
-											X: &ast.CompositeLit{
-												Type: ast.NewIdent("PackageSession"),
-												Elts: valuesList,
-											},
-										},
-									},
-								},
-							},
-						},
-					})
+								}}
+							}
+							c.Replace(n)
+							//if fname == "elf.go" {
+							//	fmt.Println("-----------------")
+							//	format.Node(os.Stdout, s.fset, c.Node())
+							//	fmt.Println("-----------------")
+							//}
 
-					info.Files["package-session.go"] = f
+						}
+						return true
+					}
+					result := astutil.Apply(file, f, nil)
+					if result == nil {
+						info.Files[fname] = nil
+					} else {
+						info.Files[fname] = result.(*ast.File)
+					}
 				}
 
-				// TODO: vars
+				f := &ast.File{
+					Name: ast.NewIdent(info.Name),
+				}
 
-				// 2) Convert them to struct fields and methods. Convert func "main" to method "Main".
+				// make a list of *ast.Field corresponding to the names and types of the deleted vars
+				var fields []*ast.Field
+				type valueItem struct {
+					name  string
+					value ast.Expr
+				}
+				var values []valueItem
+				objects := map[types.Object]bool{}
+				for spec := range vars {
+
+					// look up the object in the types.Defs
+					for _, id := range spec.Names {
+						def, ok := info.Info.Defs[id]
+						if !ok {
+							panic(fmt.Sprintf("can't find %s in defs", id.Name))
+						}
+						objects[def] = true
+					}
+
+					for i, v := range spec.Values {
+						// save any values
+						values = append(values, valueItem{name: spec.Names[i].Name, value: v})
+					}
+					if spec.Type != nil {
+						// if a type is specified, we can add the names as one field
+						infoType := info.Info.Types[spec.Type]
+						if infoType.Type == nil {
+							panic(fmt.Sprintf("no type for %v in %s", spec.Names, relpath))
+						}
+						f := &ast.Field{
+							Names: spec.Names,
+							Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
+						}
+						fields = append(fields, f)
+						continue
+					}
+					// if spec.Type is nil, we must separate the name / value pairs
+					// TODO: determine type from value (will need to scan with type checker)
+					for i := range spec.Names {
+						name := spec.Names[i]
+						value := spec.Values[i]
+						infoType := info.Info.Types[value]
+						if infoType.Type == nil {
+							panic("no type for " + name.Name + " in " + relpath)
+						}
+						f := &ast.Field{
+							Names: []*ast.Ident{name},
+							Type:  s.typeToAstTypeSpec(infoType.Type, path.Join(s.destination, relpath), f),
+						}
+						fields = append(fields, f)
+					}
+
+					/*
+						t := spec.
+						if t == nil {
+							t = getType()
+						}
+						if len(spec.Names) > 0 && spec.Type != nil {
+
+						} else {
+							fmt.Println(spec.Names, spec.Type)
+						}
+					*/
+				}
+
+				// 3) Add a PackageSession struct with those fields and methods
+				f.Decls = append(f.Decls, &ast.GenDecl{
+					Tok: token.TYPE,
+					Specs: []ast.Spec{
+						&ast.TypeSpec{
+							Name: ast.NewIdent("PackageSession"),
+							Type: &ast.StructType{
+								Fields: &ast.FieldList{
+									List: fields,
+								},
+							},
+						},
+					},
+				})
+
+				var body []ast.Stmt
+
+				body = append(body, &ast.AssignStmt{
+					Lhs: []ast.Expr{ast.NewIdent("psess")},
+					Tok: token.DEFINE,
+					Rhs: []ast.Expr{
+						&ast.UnaryExpr{
+							Op: token.AND,
+							X: &ast.CompositeLit{
+								Type: ast.NewIdent("PackageSession"),
+							},
+						},
+					},
+				})
+
+				for _, i := range info.Info.InitOrder {
+					for _, v := range i.Lhs {
+						body = append(body, &ast.AssignStmt{
+							Lhs: []ast.Expr{
+								&ast.SelectorExpr{
+									X:   ast.NewIdent("psess"),
+									Sel: ast.NewIdent(v.Name()),
+								},
+							},
+							Tok: token.ASSIGN,
+							Rhs: []ast.Expr{i.Rhs},
+						})
+					}
+				}
+
+				body = append(body, &ast.ReturnStmt{
+					Results: []ast.Expr{
+						ast.NewIdent("psess"),
+					},
+				})
+
+				// Add NewPackageSession function with initialisation logic
+				f.Decls = append(f.Decls, &ast.FuncDecl{
+					Name: ast.NewIdent("NewPackageSession"),
+					Type: &ast.FuncType{
+						Params: &ast.FieldList{},
+						Results: &ast.FieldList{
+							List: []*ast.Field{
+								{
+									Type: &ast.StarExpr{
+										X: ast.NewIdent("PackageSession"),
+									},
+								},
+							},
+						},
+					},
+					Body: &ast.BlockStmt{
+						List: body,
+					},
+				})
+
+				info.Files["package-session.go"] = f
+
+				// *) All usages of package level var X get converted into psess.X
+
+				for fname, file := range info.Files {
+					f := astutil.Apply(file, func(c *astutil.Cursor) bool {
+						switch n := c.Node().(type) {
+						case *ast.Ident:
+							use, ok := info.Info.Uses[n]
+							if !ok {
+								return true
+							}
+							if objects[use] {
+								c.Replace(&ast.SelectorExpr{
+									X:   ast.NewIdent("psess"),
+									Sel: n,
+								})
+							}
+						}
+						return true
+					}, nil)
+					info.Files[fname] = f.(*ast.File)
+				}
+
+				// *) Convert func "main" to method "Main".
+
+				// *) All other packages that import this one get wired up somehow :/
 
 			}
-			// 4) All methods of other types in the package get Package added as a param
-			// 5) All other packages that import this one get wired up somehow :/
 
-			// pkg := paths[m.Path].Packages[m.Name]
 		},
 	}
 }
@@ -485,37 +526,13 @@ func (s *Session) typeToAstTypeSpec(t types.Type, path string, f *ast.File) ast.
 		if t.Obj().Pkg().Path() == path {
 			return ast.NewIdent(t.Obj().Name())
 		}
-		var found bool
-		// lookup package in file imports
-		for _, is := range f.Imports {
-			importpath, err := strconv.Unquote(is.Path.Value)
-			if err != nil {
-				panic(err)
-			}
-			if importpath == t.Obj().Pkg().Path() {
-				if is.Name != nil && is.Name.Name != "" {
-					// if current import is aliased, just use that name
-					return &ast.SelectorExpr{
-						X:   ast.NewIdent(is.Name.Name),
-						Sel: ast.NewIdent(t.Obj().Name()),
-					}
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			// if not found, add the import to the ast file imports
-			f.Imports = append(f.Imports, &ast.ImportSpec{
-				Path: &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(t.Obj().Pkg().Path())},
-			})
-		}
-		pkg := s.prog.Package(t.Obj().Pkg().Path())
-		if pkg == nil {
-			panic(fmt.Sprintf("package %s not found", t.Obj().Pkg().Path()))
+		ih := progutils.NewImportsHelper(f, s.prog)
+		name, err := ih.RegisterImport(t.Obj().Pkg().Path())
+		if err != nil {
+			panic(err)
 		}
 		return &ast.SelectorExpr{
-			X:   ast.NewIdent(pkg.Pkg.Name()),
+			X:   ast.NewIdent(name),
 			Sel: ast.NewIdent(t.Obj().Name()),
 		}
 	}

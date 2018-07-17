@@ -155,7 +155,6 @@ func TestAll(t *testing.T) {
 			},
 		},
 		"update imports": {
-			//skip:     true,
 			files:    `import "fmt"; var a = fmt.Sprint("")`,
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
@@ -172,9 +171,44 @@ func TestAll(t *testing.T) {
 					}`,
 			},
 		},
+		"two packages": {
+			files: map[string]map[string]string{
+				"a": {"a.go": `package a; import "b"; func a(){b.B()}`},
+				"b": {"b.go": `package b; func B(){}`},
+			},
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]map[string]string{
+				"a": {
+					"a.go": `func (psess *PackageSession) a(){
+						psess.b.B()
+					}`,
+					"package-session.go": `
+						import "b"
+						type PackageSession struct {
+							b *b.PackageSession
+						}
+						func NewPackageSession(b_psess *b.PackageSession) *PackageSession {
+							psess := &PackageSession{}
+							psess.b = b_psess
+							return psess
+						}`,
+				},
+				"b": {
+					"b.go": `package b; func (psess *PackageSession) B(){}`,
+					"package-session.go": `
+						package b 
+						type PackageSession struct {
+						}
+						func NewPackageSession() *PackageSession {
+							psess := &PackageSession{}
+							return psess
+						}`,
+				},
+			},
+		},
 	}
 
-	single := "update imports" // during dev, set this to the name of a test case to just run that single case
+	single := "" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}
@@ -288,8 +322,9 @@ func runTest(spec testspec) error {
 			if err != nil {
 				return err
 			}
-			foundBytes, err := format.Source([]byte(found))
+			foundBytes, err := format.Source(found)
 			if err != nil {
+				fmt.Println(string(found))
 				return err
 			}
 			if string(expectedBytes) != string(foundBytes) {

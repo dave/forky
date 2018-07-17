@@ -396,6 +396,16 @@ func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func (s *Session) Rel(path string) (found bool, rel string) {
+	if s.destination == "" {
+		return true, path
+	}
+	if strings.HasPrefix(path, s.destination+"/") {
+		return true, strings.TrimPrefix(path, s.destination+"/")
+	}
+	return false, ""
+}
+
 func (s *Session) Save() error {
 	tempfs := memfs.New()
 

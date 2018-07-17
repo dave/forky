@@ -136,11 +136,12 @@ func (m Libify) Apply(s *Session) Applier {
 						}
 						return true
 					}
-					result := astutil.Apply(file, f, nil)
-					if result == nil {
+					resultNode := astutil.Apply(file, f, nil)
+					if resultNode == nil {
 						info.Files[fname] = nil
 					} else {
-						info.Files[fname] = result.(*ast.File)
+						result := resultNode.(*ast.File)
+						info.Files[fname] = result
 					}
 				}
 
@@ -321,7 +322,11 @@ func (m Libify) Apply(s *Session) Applier {
 						}
 						return true
 					}, nil)
-					info.Files[fname] = f.(*ast.File)
+					result := f.(*ast.File)
+					info.Files[fname] = result
+
+					ih := progutils.NewImportsHelper(info.Info.Pkg.Path(), result, s.prog)
+					ih.RefreshFromCode()
 				}
 
 				// *) Convert func "main" to method "Main".
@@ -531,7 +536,7 @@ func (s *Session) typeToAstTypeSpec(t types.Type, path string, f *ast.File) ast.
 			// t.Obj().Pkg() == nil for "error"
 			return ast.NewIdent(t.Obj().Name())
 		}
-		ih := progutils.NewImportsHelper(f, s.prog)
+		ih := progutils.NewImportsHelper(t.Obj().Pkg().Path(), f, s.prog)
 		name, err := ih.RegisterImport(t.Obj().Pkg().Path())
 		if err != nil {
 			panic(err)

@@ -174,7 +174,7 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "" // during dev, set this to the name of a test case to just run that single case
+	single := "update imports" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}

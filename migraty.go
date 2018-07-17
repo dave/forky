@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -318,6 +319,68 @@ func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(
 	}
 
 	return
+}
+
+func (s *Session) load() {
+	// save all files to a memfs
+	gopathfs := memfs.New()
+	var count int
+	for relpath, info := range s.paths {
+		fmt.Fprintf(s.out, "\rScanning: %d/%d", count+1, len(s.paths))
+		count++
+		for _, pkg := range info.Packages {
+			for fname, file := range pkg.Files {
+
+				if file == nil {
+					continue
+				}
+
+				rootrelfpath := filepath.Join("gopath", "src", s.destination, relpath, fname)
+
+				buf := &bytes.Buffer{}
+				if err := format.Node(buf, s.fset, file); err != nil {
+					panic(fmt.Errorf("format.Node error in %s: %v", rootrelfpath, err))
+				}
+
+				if err := fsutil.WriteFile(gopathfs, rootrelfpath, 0666, buf); err != nil {
+					panic(err)
+				}
+			}
+		}
+	}
+
+	bc := buildContext(s.gorootfs, gopathfs, s.destination)
+	lc := loader.Config{
+		ParserMode: parser.ParseComments,
+		Fset:       s.fset,
+		Build:      bc,
+		Cwd:        "/",
+	}
+	for relpath, pathInfo := range s.paths {
+		if len(pathInfo.Packages) == 0 {
+			continue
+		}
+		lc.Import(path.Join(s.destination, relpath))
+	}
+	p, err := lc.Load()
+	if err != nil {
+		panic(err)
+	}
+	s.prog = p
+	for pkg, info := range p.AllPackages {
+		relpath := strings.TrimPrefix(pkg.Path(), s.destination+"/")
+		if s.paths[relpath] == nil || s.paths[relpath].Packages[pkg.Name()] == nil {
+			// only update packages that exist in s.paths (in infos we also have std lib etc).
+			continue
+		}
+		files := map[string]*ast.File{}
+		for _, f := range info.Files {
+			_, fname := filepath.Split(s.fset.File(f.Pos()).Name())
+			files[fname] = f
+		}
+		s.paths[relpath].Packages[pkg.Name()].Files = files
+		s.paths[relpath].Packages[pkg.Name()].Info = info
+	}
 }
 
 func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {

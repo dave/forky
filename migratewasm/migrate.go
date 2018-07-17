@@ -105,6 +105,9 @@ var Default = []migraty.Mutator{
 	// All tests pass now!
 
 	migraty.Libify{
-		Packages: []string{"src/cmd/compile/internal/gc"},
+		Packages: []string{
+			"src/cmd/compile",
+			"src/cmd/link",
+		},
 	},
 }

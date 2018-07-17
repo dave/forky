@@ -86,6 +86,56 @@ func TestAll(t *testing.T) {
 					}`,
 			},
 		},
+		"libify func": {
+			files:    `func a() int{return 1}; func c() int {return a()}; var b = a()`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": `func (psess *PackageSession) a() int { return 1 }
+				func (psess *PackageSession) c() int { return psess.a() }`,
+				"package-session.go": `
+					type PackageSession struct {
+						b int
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						psess.b = psess.a()
+						return psess
+					}`,
+			},
+		},
+		"libify method": {
+			// TODO: psess.b.a(psess) shouldn't span 2 lines.
+			files: `type T struct{}
+				func (T) a() int{ return 1 }
+				var b = T{}
+				var c = b.a()
+				func d() int {
+					return b.a()
+				}
+				`,
+			mutators: Libify{[]string{"a"}},
+			expected: map[string]string{
+				"a.go": `type T struct{}
+					
+					func (T) a(psess *PackageSession) int { return 1 }
+
+					func (psess *PackageSession) d() int {
+						return psess.b.a(psess)
+					}`,
+				"package-session.go": `
+					type PackageSession struct {
+						b T
+						c int
+					}
+					func NewPackageSession() *PackageSession {
+						psess := &PackageSession{}
+						psess.b = T{}
+						psess.c = psess.
+							b.a(psess)
+						return psess
+					}`,
+			},
+		},
 		"libify var init order": {
 			files:    `var a = b; var b = 1`,
 			mutators: Libify{[]string{"a"}},
@@ -104,12 +154,12 @@ func TestAll(t *testing.T) {
 					}`,
 			},
 		},
-		"libify var func": {
-			skip:     true,
+		"update imports": {
+			//skip:     true,
 			files:    `import "fmt"; var a = fmt.Sprint("")`,
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
-				"a.go": `import "fmt"`,
+				"a.go": ``,
 				"package-session.go": `
 					import "fmt"
 					type PackageSession struct {
@@ -131,13 +181,13 @@ func TestAll(t *testing.T) {
 	}
 
 	var skipped bool
-	for _, spec := range tests {
+	for name, spec := range tests {
 		if spec.skip {
 			skipped = true
 			continue
 		}
 		if err := runTest(spec); err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", name, err)
 			return
 		}
 	}
@@ -152,7 +202,6 @@ func TestAll(t *testing.T) {
 
 type testspec struct {
 	skip     bool
-	name     string
 	files    interface{} // either map[string]map[string]string, map[string]string or string
 	mutators interface{} // either Mutator or []Mutator
 	expected interface{} // either map[string]map[string]string, map[string]string or string

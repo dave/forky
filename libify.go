@@ -1,12 +1,9 @@
 package migraty
 
 import (
-	"bytes"
 	"fmt"
 	"go/ast"
 	"go/build"
-	"go/format"
-	"go/parser"
 	"go/token"
 	"go/types"
 	"io"
@@ -15,12 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dave/services/fsutil"
 	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/go/loader"
 	"gopkg.in/src-d/go-billy.v4"
-	"gopkg.in/src-d/go-billy.v4/memfs"
 )
 
 type Libify struct {
@@ -31,68 +25,41 @@ func (m Libify) Apply(s *Session) Applier {
 	return Applier{
 		Func: func() {
 
-			// save all files to a memfs
-			gopathfs := memfs.New()
-			var count int
-			for relpath, info := range s.paths {
-				fmt.Fprintf(s.out, "\rScanning: %d/%d", count+1, len(s.paths))
-				count++
-				for _, pkg := range info.Packages {
-					for fname, file := range pkg.Files {
+			// load the program and scan types
+			s.load()
 
-						if file == nil {
-							continue
-						}
-
-						rootrelfpath := filepath.Join("gopath", "src", s.destination, relpath, fname)
-
-						buf := &bytes.Buffer{}
-						if err := format.Node(buf, s.fset, file); err != nil {
-							panic(fmt.Errorf("format.Node error in %s: %v", rootrelfpath, err))
-						}
-
-						if err := fsutil.WriteFile(gopathfs, rootrelfpath, 0666, buf); err != nil {
-							panic(err)
-						}
+			// Find all packages and the full dependency tree (only packages in s.paths considered)
+			deps := map[string]bool{}
+			var scan func(p *PackageInfo)
+			scan = func(p *PackageInfo) {
+				for _, p := range p.Info.Pkg.Imports() {
+					if !strings.HasPrefix(p.Path(), s.destination+"/") {
+						continue
 					}
+					relpath := strings.TrimPrefix(p.Path(), s.destination+"/")
+					info, ok := s.paths[relpath]
+					if !ok {
+						continue
+					}
+					scan(info.Default)
+					deps[relpath] = true
 				}
 			}
-
-			bc := buildContext(s.gorootfs, gopathfs, s.destination)
-			lc := loader.Config{
-				ParserMode: parser.ParseComments,
-				Fset:       s.fset,
-				Build:      bc,
-				Cwd:        "/",
-			}
-			for relpath, pathInfo := range s.paths {
-				if len(pathInfo.Packages) == 0 {
-					continue
+			for _, relpath := range m.Packages {
+				info := s.paths[relpath].Default
+				if info == nil {
+					panic(fmt.Sprintf("no default package for %s", relpath))
 				}
-				lc.Import(path.Join(s.destination, relpath))
-			}
-			p, err := lc.Load()
-			if err != nil {
-				panic(err)
-			}
-			s.prog = p
-			for pkg, info := range p.AllPackages {
-				relpath := strings.TrimPrefix(pkg.Path(), s.destination+"/")
-				if s.paths[relpath] == nil || s.paths[relpath].Packages[pkg.Name()] == nil {
-					// only update packages that exist in s.paths (in infos we also have std lib etc).
-					continue
-				}
-				files := map[string]*ast.File{}
-				for _, f := range info.Files {
-					_, fname := filepath.Split(s.fset.File(f.Pos()).Name())
-					files[fname] = f
-				}
-				s.paths[relpath].Packages[pkg.Name()].Files = files
-				s.paths[relpath].Packages[pkg.Name()].Info = info
+				scan(info)
+				deps[relpath] = true
 			}
 
 			// 1) Find all package-level vars and funcs
-			for _, relpath := range m.Packages {
+			var count int
+			for relpath := range deps {
+				count++
+				fmt.Fprintf(s.out, "\rLibify: %d/%d", count, len(deps))
+
 				info := s.paths[relpath].Default
 				vars := map[*ast.ValueSpec]bool{}
 				varObjects := map[types.Object]bool{}
@@ -100,7 +67,6 @@ func (m Libify) Apply(s *Session) Applier {
 				methodObjects := map[types.Object]bool{}
 
 				for fname, file := range info.Files {
-					//_, fname := filepath.Split(fpath)
 					f := func(c *astutil.Cursor) bool {
 						switch n := c.Node().(type) {
 						case *ast.GenDecl:
@@ -118,6 +84,9 @@ func (m Libify) Apply(s *Session) Applier {
 
 								// look up the object in the types.Defs
 								for _, id := range spec.Names {
+									if id.Name == "_" {
+										continue
+									}
 									def, ok := info.Info.Defs[id]
 									if !ok {
 										panic(fmt.Sprintf("can't find %s in defs", id.Name))
@@ -164,12 +133,6 @@ func (m Libify) Apply(s *Session) Applier {
 								funcObjects[def] = true
 							}
 							c.Replace(n)
-							//if fname == "elf.go" {
-							//	fmt.Println("-----------------")
-							//	format.Node(os.Stdout, s.fset, c.Node())
-							//	fmt.Println("-----------------")
-							//}
-
 						}
 						return true
 					}
@@ -196,6 +159,9 @@ func (m Libify) Apply(s *Session) Applier {
 
 					for i, v := range spec.Values {
 						// save any values
+						if spec.Names[i].Name == "_" {
+							continue
+						}
 						values = append(values, valueItem{name: spec.Names[i].Name, value: v})
 					}
 					if spec.Type != nil {
@@ -215,6 +181,9 @@ func (m Libify) Apply(s *Session) Applier {
 					// TODO: determine type from value (will need to scan with type checker)
 					for i := range spec.Names {
 						name := spec.Names[i]
+						if name.Name == "_" {
+							continue
+						}
 						value := spec.Values[i]
 						infoType := info.Info.Types[value]
 						if infoType.Type == nil {
@@ -272,6 +241,9 @@ func (m Libify) Apply(s *Session) Applier {
 
 				for _, i := range info.Info.InitOrder {
 					for _, v := range i.Lhs {
+						if v.Name() == "_" {
+							continue
+						}
 						body = append(body, &ast.AssignStmt{
 							Lhs: []ast.Expr{
 								&ast.SelectorExpr{
@@ -555,7 +527,8 @@ func (s *Session) typeToAstTypeSpec(t types.Type, path string, f *ast.File) ast.
 			Value: s.typeToAstTypeSpec(t.Elem(), path, f),
 		}
 	case *types.Named:
-		if t.Obj().Pkg().Path() == path {
+		if t.Obj().Pkg() == nil || t.Obj().Pkg().Path() == path {
+			// t.Obj().Pkg() == nil for "error"
 			return ast.NewIdent(t.Obj().Name())
 		}
 		ih := progutils.NewImportsHelper(f, s.prog)

@@ -15,6 +15,10 @@ type Libifier struct {
 	libify   Libify
 	session  *Session
 	packages map[string]*LibifyPackage
+
+	varObjects    map[types.Object]bool
+	methodObjects map[types.Object]bool
+	funcObjects   map[types.Object]bool
 }
 
 func NewLibifier(l Libify, s *Session) *Libifier {
@@ -22,25 +26,24 @@ func NewLibifier(l Libify, s *Session) *Libifier {
 		libify:   l,
 		session:  s,
 		packages: map[string]*LibifyPackage{},
+
+		varObjects:    map[types.Object]bool{},
+		methodObjects: map[types.Object]bool{},
+		funcObjects:   map[types.Object]bool{},
 	}
 }
 
 type LibifyPackage struct {
 	*PackageInfo
-	session  *Session
-	libifier *Libifier
-	relpath  string
-	path     string
+	session     *Session
+	libifier    *Libifier
+	relpath     string
+	path        string
+	sessionFile *ast.File
 
 	vars    map[*ast.GenDecl]bool
 	methods map[*ast.FuncDecl]bool
 	funcs   map[*ast.FuncDecl]bool
-
-	varObjects    map[types.Object]bool
-	methodObjects map[types.Object]bool
-	funcObjects   map[types.Object]bool
-
-	sessionFile *ast.File
 }
 
 func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *LibifyPackage {
@@ -54,10 +57,6 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 		vars:    map[*ast.GenDecl]bool{},
 		methods: map[*ast.FuncDecl]bool{},
 		funcs:   map[*ast.FuncDecl]bool{},
-
-		varObjects:    map[types.Object]bool{},
-		methodObjects: map[types.Object]bool{},
-		funcObjects:   map[types.Object]bool{},
 	}
 }
 
@@ -169,7 +168,7 @@ func (l *Libifier) findDecls() error {
 							if !ok {
 								panic(fmt.Sprintf("can't find %s in defs", id.Name))
 							}
-							pkg.varObjects[def] = true
+							pkg.libifier.varObjects[def] = true
 						}
 					}
 
@@ -183,11 +182,11 @@ func (l *Libifier) findDecls() error {
 					if n.Recv != nil && len(n.Recv.List) > 0 {
 						// method
 						pkg.methods[n] = true
-						pkg.methodObjects[def] = true
+						pkg.libifier.methodObjects[def] = true
 					} else {
 						// function
 						pkg.funcs[n] = true
-						pkg.funcObjects[def] = true
+						pkg.libifier.funcObjects[def] = true
 					}
 					c.Replace(n)
 				}
@@ -501,11 +500,17 @@ func (l *Libifier) updateVarFuncUsage() error {
 			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
 				case *ast.Ident:
+					// a -> psess.a (only if a is a var or func in the current package)
 					use, ok := pkg.Info.Uses[n]
 					if !ok {
 						return true
 					}
-					if pkg.varObjects[use] || pkg.funcObjects[use] {
+					if pkg.libifier.varObjects[use] || pkg.libifier.funcObjects[use] {
+						if use.Pkg().Path() != pkg.path {
+							// This is only for if the object is in the local package. Without this,
+							// we trigger on the "a" part of foo.a where foo is another package.
+							return true
+						}
 						c.Replace(&ast.SelectorExpr{
 							X:   ast.NewIdent("psess"),
 							Sel: n,
@@ -539,7 +544,7 @@ func (l *Libifier) updateMethodUsage() error {
 					if !ok {
 						return true
 					}
-					if pkg.methodObjects[use] {
+					if pkg.libifier.methodObjects[use] {
 						n.Args = append([]ast.Expr{ast.NewIdent("psess")}, n.Args...)
 					}
 					c.Replace(n)
@@ -563,15 +568,14 @@ func (l *Libifier) updateSelectorUsage() error {
 					if packagePath == "" {
 						return true
 					}
-					imp := pkg.libifier.packageFromPath(packagePath)
-					if imp == nil {
+					if pkg.libifier.packageFromPath(packagePath) == nil {
 						return true
 					}
 					use, ok := pkg.Info.Uses[n.Sel]
 					if !ok {
 						return true
 					}
-					if imp.varObjects[use] || imp.funcObjects[use] {
+					if pkg.libifier.varObjects[use] || pkg.libifier.funcObjects[use] {
 						pkgName := n.X.(*ast.Ident).Name
 						newNode := &ast.SelectorExpr{
 							X: &ast.SelectorExpr{
@@ -581,7 +585,6 @@ func (l *Libifier) updateSelectorUsage() error {
 							Sel: n.Sel,
 						}
 						c.Replace(newNode)
-
 					}
 				}
 				return true

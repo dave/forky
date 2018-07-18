@@ -688,9 +688,18 @@ func (l *Libifier) updateMethodUsage() error {
 					if !ok {
 						return true
 					}
+
 					if pkg.libifier.methodObjects[use] {
-						n.Args = append([]ast.Expr{ast.NewIdent("psess")}, n.Args...)
+						if use.Pkg().Path() == pkg.path {
+							n.Args = append([]ast.Expr{ast.NewIdent("psess")}, n.Args...)
+						} else {
+							n.Args = append([]ast.Expr{&ast.SelectorExpr{
+								X:   ast.NewIdent("psess"),
+								Sel: ast.NewIdent(use.Pkg().Name()),
+							}}, n.Args...)
+						}
 					}
+
 					c.Replace(n)
 				}
 				return true

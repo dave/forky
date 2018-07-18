@@ -106,6 +106,18 @@ func (l *Libifier) scanDeps() error {
 	// Find all packages and the full dependency tree (only packages in s.paths considered)
 	var scan func(p *PackageInfo)
 	scan = func(p *PackageInfo) {
+		if p == nil {
+			panic("p == nil!!!")
+			return
+		}
+		if p.Info == nil {
+			panic("p.Info == nil!!! " + p.Name)
+			return
+		}
+		if p.Info.Pkg == nil {
+			panic("p.Info.Pkg == nil!!! " + p.Name)
+			return
+		}
 		for _, imported := range p.Info.Pkg.Imports() {
 			isrel, relpath := l.session.Rel(imported.Path())
 			if !isrel {

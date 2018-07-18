@@ -18,7 +18,9 @@ import (
 
 	"github.com/dave/services/fsutil"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/go/ssa"
 	"gopkg.in/src-d/go-billy.v4"
 	"gopkg.in/src-d/go-billy.v4/helper/mount"
 	"gopkg.in/src-d/go-billy.v4/helper/polyfill"
@@ -36,6 +38,8 @@ type Session struct {
 	out                 io.Writer
 	ParseFilter         func(relpath string, file os.FileInfo) bool
 	prog                *loader.Program
+	ssa                 *ssa.Program
+	graph               *callgraph.Graph
 }
 
 func NewSession(source, destination string) *Session {

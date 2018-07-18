@@ -9,6 +9,10 @@ import (
 
 	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 type Libifier struct {
@@ -20,7 +24,7 @@ type Libifier struct {
 	methodObjects map[types.Object]bool
 	funcObjects   map[types.Object]bool
 
-	varUses map[*ast.FuncDecl]map[types.Object]bool
+	varUses map[types.Object]map[types.Object]bool
 }
 
 func NewLibifier(l Libify, s *Session) *Libifier {
@@ -33,12 +37,13 @@ func NewLibifier(l Libify, s *Session) *Libifier {
 		methodObjects: map[types.Object]bool{},
 		funcObjects:   map[types.Object]bool{},
 
-		varUses: map[*ast.FuncDecl]map[types.Object]bool{},
+		varUses: map[types.Object]map[types.Object]bool{},
 	}
 }
 
 type LibifyPackage struct {
 	*PackageInfo
+	ssa         *ssa.Package
 	session     *Session
 	libifier    *Libifier
 	relpath     string
@@ -76,6 +81,10 @@ func (l *Libifier) Run() error {
 	}
 
 	if err := l.findVarUses(); err != nil {
+		return err
+	}
+
+	if err := l.generateCallGraph(); err != nil {
 		return err
 	}
 
@@ -201,6 +210,10 @@ func (l *Libifier) findVarUses() error {
 			astutil.Apply(file, func(c *astutil.Cursor) bool {
 				switch decl := c.Node().(type) {
 				case *ast.FuncDecl:
+					obj, ok := pkg.Info.Defs[decl.Name]
+					if !ok {
+						panic("func not found in defs " + decl.Name.Name)
+					}
 					astutil.Apply(decl.Body, func(c *astutil.Cursor) bool {
 						switch n := c.Node().(type) {
 						case *ast.Ident:
@@ -211,10 +224,10 @@ func (l *Libifier) findVarUses() error {
 							if !l.varObjects[use] {
 								return true
 							}
-							if l.varUses[decl] == nil {
-								l.varUses[decl] = map[types.Object]bool{}
+							if l.varUses[obj] == nil {
+								l.varUses[obj] = map[types.Object]bool{}
 							}
-							l.varUses[decl][use] = true
+							l.varUses[obj][use] = true
 						}
 						return true
 					}, nil)
@@ -223,6 +236,42 @@ func (l *Libifier) findVarUses() error {
 			}, nil)
 		}
 	}
+	return nil
+}
+
+func (l *Libifier) generateCallGraph() error {
+	prog := ssautil.CreateProgram(l.session.prog, 0)
+	for _, p := range prog.AllPackages() {
+		pkg := l.packageFromPath(p.Pkg.Path())
+		if pkg == nil {
+			continue
+		}
+		p.Build()
+		pkg.ssa = p
+	}
+	l.session.ssa = prog
+	l.session.graph = cha.CallGraph(prog)
+	/*
+		var printNode func(int, *callgraph.Node)
+		printNode = func(indent int, node *callgraph.Node) {
+			fmt.Print(strings.Repeat(" ", indent))
+			if node.Func == nil {
+				fmt.Println("<nil>")
+			} else {
+				fmt.Println(node.Func.Name())
+			}
+			for _, edge := range node.Out {
+				printNode(indent+4, edge.Callee)
+			}
+		}
+		for f, n := range graph.Nodes {
+			if f == nil {
+				continue
+			}
+			fmt.Println("Node:", f.Name())
+			printNode(0, n)
+		}
+	*/
 	return nil
 }
 
@@ -239,6 +288,39 @@ func (l *Libifier) findFuncs() error {
 					def, ok := pkg.Info.Defs[n.Name]
 					if !ok {
 						panic(fmt.Sprintf("can't find %s in defs", n.Name.Name))
+					}
+
+					// inspect the callgraph to see if this or any callees use package level vars
+					var found bool
+					done := map[*callgraph.Node]bool{}
+					var inspect func(n *callgraph.Node)
+					inspect = func(n *callgraph.Node) {
+
+						if n == nil {
+							return
+						}
+						if done[n] {
+							return
+						}
+						done[n] = true
+
+						obj := n.Func.Object()
+						uses := l.varUses[obj]
+						if uses != nil && len(uses) > 0 {
+							found = true
+							return
+						}
+
+						for _, edge := range n.Out {
+							inspect(edge.Callee)
+						}
+					}
+					ssafunc := l.session.ssa.FuncValue(def.(*types.Func))
+					inspect(l.session.graph.Nodes[ssafunc])
+
+					if !found {
+						// call graph doesn't contain any var uses, so we can skip this function
+						return true
 					}
 
 					if n.Recv != nil && len(n.Recv.List) > 0 {

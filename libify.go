@@ -16,7 +16,7 @@ import (
 )
 
 type Libify struct {
-	Packages []string // package path -> package name -> true
+	Packages []string
 }
 
 func (m Libify) Apply(s *Session) Applier {

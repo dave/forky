@@ -9,10 +9,6 @@ import (
 
 	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/callgraph/cha"
-	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 type Libifier struct {
@@ -24,7 +20,8 @@ type Libifier struct {
 	methodObjects map[types.Object]bool
 	funcObjects   map[types.Object]bool
 
-	varUses map[types.Object]map[types.Object]bool
+	varUses  map[types.Object]map[types.Object]bool
+	funcUses map[types.Object]map[types.Object]bool
 }
 
 func NewLibifier(l Libify, s *Session) *Libifier {
@@ -37,13 +34,13 @@ func NewLibifier(l Libify, s *Session) *Libifier {
 		methodObjects: map[types.Object]bool{},
 		funcObjects:   map[types.Object]bool{},
 
-		varUses: map[types.Object]map[types.Object]bool{},
+		varUses:  map[types.Object]map[types.Object]bool{},
+		funcUses: map[types.Object]map[types.Object]bool{},
 	}
 }
 
 type LibifyPackage struct {
 	*PackageInfo
-	ssa         *ssa.Package
 	session     *Session
 	libifier    *Libifier
 	relpath     string
@@ -84,9 +81,9 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	if err := l.generateCallGraph(); err != nil {
-		return err
-	}
+	//if err := l.generateCallGraph(); err != nil {
+	//	return err
+	//}
 
 	// finds all package level funcs and methods, populates methods, funcs, methodObjects, funcObjects
 	if err := l.findFuncs(); err != nil {
@@ -221,13 +218,21 @@ func (l *Libifier) findVarUses() error {
 							if !ok {
 								return true
 							}
-							if !l.varObjects[use] {
+							if l.varObjects[use] {
+								if l.varUses[obj] == nil {
+									l.varUses[obj] = map[types.Object]bool{}
+								}
+								l.varUses[obj][use] = true
 								return true
 							}
-							if l.varUses[obj] == nil {
-								l.varUses[obj] = map[types.Object]bool{}
+							// funcs?
+							if _, ok := use.Type().Underlying().(*types.Signature); ok {
+								if l.funcUses[obj] == nil {
+									l.funcUses[obj] = map[types.Object]bool{}
+								}
+								l.funcUses[obj][use] = true
 							}
-							l.varUses[obj][use] = true
+
 						}
 						return true
 					}, nil)
@@ -239,6 +244,7 @@ func (l *Libifier) findVarUses() error {
 	return nil
 }
 
+/*
 func (l *Libifier) generateCallGraph() error {
 	prog := ssautil.CreateProgram(l.session.prog, 0)
 	for _, p := range prog.AllPackages() {
@@ -251,7 +257,7 @@ func (l *Libifier) generateCallGraph() error {
 	}
 	l.session.ssa = prog
 	l.session.graph = cha.CallGraph(prog)
-	/*
+	if false {
 		var printNode func(int, *callgraph.Node)
 		printNode = func(indent int, node *callgraph.Node) {
 			fmt.Print(strings.Repeat(" ", indent))
@@ -271,9 +277,10 @@ func (l *Libifier) generateCallGraph() error {
 			fmt.Println("Node:", f.Name())
 			printNode(0, n)
 		}
-	*/
+	}
 	return nil
 }
+*/
 
 func (l *Libifier) findFuncs() error {
 
@@ -292,31 +299,32 @@ func (l *Libifier) findFuncs() error {
 
 					// inspect the callgraph to see if this or any callees use package level vars
 					var found bool
-					done := map[*callgraph.Node]bool{}
-					var inspect func(n *callgraph.Node)
-					inspect = func(n *callgraph.Node) {
-
-						if n == nil {
+					done := map[types.Object]bool{}
+					var inspect func(obj types.Object)
+					inspect = func(obj types.Object) {
+						if obj == nil {
 							return
 						}
-						if done[n] {
+						if done[obj] {
 							return
 						}
-						done[n] = true
+						done[obj] = true
 
-						obj := n.Func.Object()
 						uses := l.varUses[obj]
 						if uses != nil && len(uses) > 0 {
 							found = true
 							return
 						}
 
-						for _, edge := range n.Out {
-							inspect(edge.Callee)
+						callees, ok := l.funcUses[obj]
+						if !ok {
+							return
+						}
+						for callee := range callees {
+							inspect(callee)
 						}
 					}
-					ssafunc := l.session.ssa.FuncValue(def.(*types.Func))
-					inspect(l.session.graph.Nodes[ssafunc])
+					inspect(def)
 
 					if !found {
 						// call graph doesn't contain any var uses, so we can skip this function

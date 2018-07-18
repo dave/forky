@@ -119,8 +119,8 @@ func (l *Libifier) scanDeps() error {
 			return
 		}
 		for _, imported := range p.Info.Pkg.Imports() {
-			isrel, relpath := l.session.Rel(imported.Path())
-			if !isrel {
+			relpath, ok := l.session.Rel(imported.Path())
+			if !ok {
 				continue
 			}
 			info, ok := l.session.paths[relpath]
@@ -305,11 +305,8 @@ func (pkg *LibifyPackage) generatePackageSessionImportFields() ([]*ast.Field, er
 	// foo *foo.PackageSession
 	var fields []*ast.Field
 	for _, imp := range pkg.Info.Pkg.Imports() {
-		found, relpath := pkg.session.Rel(imp.Path())
-		if !found {
-			continue
-		}
-		if pkg.libifier.packages[relpath] == nil {
+		impPkg := pkg.libifier.packageFromPath(imp.Path())
+		if impPkg == nil {
 			continue
 		}
 		pkgId := ast.NewIdent(imp.Name())
@@ -409,11 +406,8 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncParams() ([]*ast.Field, e
 	var params []*ast.Field
 	// b_psess *b.PackageSession
 	for _, imp := range pkg.Info.Pkg.Imports() {
-		found, relpath := pkg.session.Rel(imp.Path())
-		if !found {
-			continue
-		}
-		if pkg.libifier.packages[relpath] == nil {
+		impPkg := pkg.libifier.packageFromPath(imp.Path())
+		if impPkg == nil {
 			continue
 		}
 		pkgId := ast.NewIdent(imp.Name())
@@ -454,11 +448,8 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncBody() ([]ast.Stmt, error
 	// Assign the injected package session for all imported packages
 	// psess.foo = foo_psess
 	for _, imp := range pkg.Info.Pkg.Imports() {
-		found, relpath := pkg.session.Rel(imp.Path())
-		if !found {
-			continue
-		}
-		if pkg.libifier.packages[relpath] == nil {
+		impPkg := pkg.libifier.packageFromPath(imp.Path())
+		if impPkg == nil {
 			continue
 		}
 		body = append(body, &ast.AssignStmt{
@@ -568,16 +559,12 @@ func (l *Libifier) updateSelectorUsage() error {
 				switch n := c.Node().(type) {
 				case *ast.SelectorExpr:
 					// a.B() -> psess.a.B() (only if a is a package in the deps)
-					packagePath, _, _, _ := progutils.PackageSelector(n, pkg.Info.Pkg.Path(), l.session.prog)
+					packagePath, _, _, _ := progutils.QualifiedIdentifierInfo(n, pkg.Info.Pkg.Path(), l.session.prog)
 					if packagePath == "" {
 						return true
 					}
-					found, relpath := l.session.Rel(packagePath)
-					if !found {
-						return true
-					}
-					imp, ok := l.packages[relpath]
-					if !ok {
+					imp := pkg.libifier.packageFromPath(packagePath)
+					if imp == nil {
 						return true
 					}
 					use, ok := pkg.Info.Uses[n.Sel]
@@ -613,4 +600,16 @@ func (l *Libifier) refreshImports() error {
 		}
 	}
 	return nil
+}
+
+func (l *Libifier) packageFromPath(path string) *LibifyPackage {
+	relpath, ok := l.session.Rel(path)
+	if !ok {
+		return nil
+	}
+	pkg, ok := l.packages[relpath]
+	if !ok {
+		return nil
+	}
+	return pkg
 }

@@ -396,14 +396,14 @@ func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (s *Session) Rel(path string) (found bool, rel string) {
+func (s *Session) Rel(path string) (rel string, found bool) {
 	if s.destination == "" {
-		return true, path
+		return path, true
 	}
 	if strings.HasPrefix(path, s.destination+"/") {
-		return true, strings.TrimPrefix(path, s.destination+"/")
+		return strings.TrimPrefix(path, s.destination+"/"), true
 	}
-	return false, ""
+	return "", false
 }
 
 func (s *Session) Save() error {

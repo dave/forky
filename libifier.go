@@ -19,6 +19,8 @@ type Libifier struct {
 	varObjects    map[types.Object]bool
 	methodObjects map[types.Object]bool
 	funcObjects   map[types.Object]bool
+
+	varUses map[*ast.FuncDecl]map[types.Object]bool
 }
 
 func NewLibifier(l Libify, s *Session) *Libifier {
@@ -30,6 +32,8 @@ func NewLibifier(l Libify, s *Session) *Libifier {
 		varObjects:    map[types.Object]bool{},
 		methodObjects: map[types.Object]bool{},
 		funcObjects:   map[types.Object]bool{},
+
+		varUses: map[*ast.FuncDecl]map[types.Object]bool{},
 	}
 }
 
@@ -66,8 +70,17 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	// finds all package level vars, funcs and methods, populates vars, methods, funcs, varObjects, methodObjects, funcObjects
-	if err := l.findDecls(); err != nil {
+	// finds all package level vars, populates vars, varObjects
+	if err := l.findVars(); err != nil {
+		return err
+	}
+
+	if err := l.findVarUses(); err != nil {
+		return err
+	}
+
+	// finds all package level funcs and methods, populates methods, funcs, methodObjects, funcObjects
+	if err := l.findFuncs(); err != nil {
 		return err
 	}
 
@@ -141,7 +154,10 @@ func (l *Libifier) scanDeps() error {
 	return nil
 }
 
-func (l *Libifier) findDecls() error {
+func (l *Libifier) findVars() error {
+
+	// TODO: exclude vars that are never modified
+
 	for _, pkg := range l.packages {
 		for _, file := range pkg.Files {
 			astutil.Apply(file, func(c *astutil.Cursor) bool {
@@ -171,7 +187,53 @@ func (l *Libifier) findDecls() error {
 							pkg.libifier.varObjects[def] = true
 						}
 					}
+				}
+				return true
+			}, nil)
+		}
+	}
+	return nil
+}
 
+func (l *Libifier) findVarUses() error {
+	for _, pkg := range l.packages {
+		for _, file := range pkg.Files {
+			astutil.Apply(file, func(c *astutil.Cursor) bool {
+				switch decl := c.Node().(type) {
+				case *ast.FuncDecl:
+					astutil.Apply(decl.Body, func(c *astutil.Cursor) bool {
+						switch n := c.Node().(type) {
+						case *ast.Ident:
+							use, ok := pkg.Info.Uses[n]
+							if !ok {
+								return true
+							}
+							if !l.varObjects[use] {
+								return true
+							}
+							if l.varUses[decl] == nil {
+								l.varUses[decl] = map[types.Object]bool{}
+							}
+							l.varUses[decl][use] = true
+						}
+						return true
+					}, nil)
+				}
+				return true
+			}, nil)
+		}
+	}
+	return nil
+}
+
+func (l *Libifier) findFuncs() error {
+
+	// TODO: exclude funcs that don't need access to package level vars or funcs
+
+	for _, pkg := range l.packages {
+		for _, file := range pkg.Files {
+			astutil.Apply(file, func(c *astutil.Cursor) bool {
+				switch n := c.Node().(type) {
 				case *ast.FuncDecl:
 
 					def, ok := pkg.Info.Defs[n.Name]

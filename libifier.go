@@ -1,4 +1,4 @@
-package migraty
+package forky
 
 import (
 	"fmt"
@@ -335,6 +335,20 @@ func (l *Libifier) findFuncs() error {
 						// method
 						pkg.methods[n] = true
 						pkg.libifier.methodObjects[def] = true
+						/*
+							var recvObj types.Object
+
+							t := n.Recv.List[0].Type
+
+							switch t := n.Recv.List[0].Type.(type) {
+							case *ast.Ident:
+								recvObj = pkg.Info.Uses[t]
+							case *ast.StarExpr:
+								recvObj = pkg.Info.Uses[t.X]
+							}
+
+							fmt.Println("Method:", recvObj.Pkg().Path(), recvObj.Name())
+						*/
 					} else {
 						// function
 						pkg.funcs[n] = true

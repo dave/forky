@@ -1,4 +1,4 @@
-package migraty
+package forky
 
 import (
 	"bytes"

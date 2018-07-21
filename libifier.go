@@ -100,7 +100,7 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	// updates usage of vars and funcs to the field of the package session
+	// updates usage of vars and funcs to the field of the package state
 	if err := l.updateVarFuncUsage(); err != nil {
 		return err
 	}
@@ -336,7 +336,7 @@ func (l *Libifier) findFuncs() error {
 						pkg.methods[n] = true
 						pkg.libifier.methodObjects[def] = true
 						/*
-							// Print list of types that have methods that need Package Session
+							// Print list of types that have methods that need package state
 							recvTyp := pkg.Info.Types[n.Recv.List[0].Type].Type
 							var name string
 							for {
@@ -392,21 +392,21 @@ func (l *Libifier) updateDecls() error {
 				case *ast.FuncDecl:
 					switch {
 					case pkg.methods[n]:
-						// if method, add "psess *PackageSession" as the first parameter
-						psess := &ast.Field{
-							Names: []*ast.Ident{ast.NewIdent("psess")},
+						// if method, add "pstate *PackageState" as the first parameter
+						pstate := &ast.Field{
+							Names: []*ast.Ident{ast.NewIdent("pstate")},
 							Type: &ast.StarExpr{
-								X: ast.NewIdent("PackageSession"),
+								X: ast.NewIdent("PackageState"),
 							},
 						}
-						n.Type.Params.List = append([]*ast.Field{psess}, n.Type.Params.List...)
+						n.Type.Params.List = append([]*ast.Field{pstate}, n.Type.Params.List...)
 						c.Replace(n)
 					case pkg.funcs[n]:
-						// if func, add "psess *PackageSession" as the receiver
+						// if func, add "pstate *PackageState" as the receiver
 						n.Recv = &ast.FieldList{List: []*ast.Field{
 							{
-								Names: []*ast.Ident{ast.NewIdent("psess")},
-								Type:  &ast.StarExpr{X: ast.NewIdent("PackageSession")},
+								Names: []*ast.Ident{ast.NewIdent("pstate")},
+								Type:  &ast.StarExpr{X: ast.NewIdent("PackageState")},
 							},
 						}}
 						c.Replace(n)
@@ -432,11 +432,11 @@ func (l *Libifier) createSessionFiles() error {
 		}
 		pkg.Files["package-session.go"] = pkg.sessionFile
 
-		if err := pkg.addPackageSessionStruct(); err != nil {
+		if err := pkg.addPackageStateStruct(); err != nil {
 			return err
 		}
 
-		if err := pkg.addNewPackageSessionFunc(); err != nil {
+		if err := pkg.addNewPackageStateFunc(); err != nil {
 			return err
 		}
 
@@ -444,11 +444,11 @@ func (l *Libifier) createSessionFiles() error {
 	return nil
 }
 
-func (pkg *LibifyPackage) addPackageSessionStruct() error {
+func (pkg *LibifyPackage) addPackageStateStruct() error {
 
 	var fields []*ast.Field
 
-	importFields, err := pkg.generatePackageSessionImportFields()
+	importFields, err := pkg.generatePackageStateImportFields()
 	if err != nil {
 		return err
 	}
@@ -457,7 +457,7 @@ func (pkg *LibifyPackage) addPackageSessionStruct() error {
 	})
 	fields = append(fields, importFields...)
 
-	varFields, err := pkg.generatePackageSessionVarFields()
+	varFields, err := pkg.generatePackageStateVarFields()
 	if err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func (pkg *LibifyPackage) addPackageSessionStruct() error {
 		Tok: token.TYPE,
 		Specs: []ast.Spec{
 			&ast.TypeSpec{
-				Name: ast.NewIdent("PackageSession"),
+				Name: ast.NewIdent("PackageState"),
 				Type: &ast.StructType{
 					Fields: &ast.FieldList{
 						List: fields,
@@ -482,8 +482,8 @@ func (pkg *LibifyPackage) addPackageSessionStruct() error {
 	return nil
 }
 
-func (pkg *LibifyPackage) generatePackageSessionImportFields() ([]*ast.Field, error) {
-	// foo *foo.PackageSession
+func (pkg *LibifyPackage) generatePackageStateImportFields() ([]*ast.Field, error) {
+	// foo *foo.PackageState
 	var fields []*ast.Field
 	for _, imp := range pkg.Info.Pkg.Imports() {
 		impPkg := pkg.libifier.packageFromPath(imp.Path())
@@ -496,7 +496,7 @@ func (pkg *LibifyPackage) generatePackageSessionImportFields() ([]*ast.Field, er
 			Type: &ast.StarExpr{
 				X: &ast.SelectorExpr{
 					X:   pkgId,
-					Sel: ast.NewIdent("PackageSession"),
+					Sel: ast.NewIdent("PackageState"),
 				},
 			},
 		}
@@ -507,7 +507,7 @@ func (pkg *LibifyPackage) generatePackageSessionImportFields() ([]*ast.Field, er
 	return fields, nil
 }
 
-func (pkg *LibifyPackage) generatePackageSessionVarFields() ([]*ast.Field, error) {
+func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) {
 	var fields []*ast.Field
 	for decl := range pkg.vars {
 		for _, spec := range decl.Specs {
@@ -548,19 +548,19 @@ func (pkg *LibifyPackage) generatePackageSessionVarFields() ([]*ast.Field, error
 	return fields, nil
 }
 
-func (pkg *LibifyPackage) addNewPackageSessionFunc() error {
-	params, err := pkg.generateNewPackageSessionFuncParams()
+func (pkg *LibifyPackage) addNewPackageStateFunc() error {
+	params, err := pkg.generateNewPackageStateFuncParams()
 	if err != nil {
 		return err
 	}
 
-	body, err := pkg.generateNewPackageSessionFuncBody()
+	body, err := pkg.generateNewPackageStateFuncBody()
 	if err != nil {
 		return err
 	}
 
 	pkg.sessionFile.Decls = append(pkg.sessionFile.Decls, &ast.FuncDecl{
-		Name: ast.NewIdent("NewPackageSession"),
+		Name: ast.NewIdent("NewPackageState"),
 		Type: &ast.FuncType{
 			Params: &ast.FieldList{
 				List: params,
@@ -569,7 +569,7 @@ func (pkg *LibifyPackage) addNewPackageSessionFunc() error {
 				List: []*ast.Field{
 					{
 						Type: &ast.StarExpr{
-							X: ast.NewIdent("PackageSession"),
+							X: ast.NewIdent("PackageState"),
 						},
 					},
 				},
@@ -583,9 +583,9 @@ func (pkg *LibifyPackage) addNewPackageSessionFunc() error {
 	return nil
 }
 
-func (pkg *LibifyPackage) generateNewPackageSessionFuncParams() ([]*ast.Field, error) {
+func (pkg *LibifyPackage) generateNewPackageStateFuncParams() ([]*ast.Field, error) {
 	var params []*ast.Field
-	// b_psess *b.PackageSession
+	// b_pstate *b.PackageState
 	for _, imp := range pkg.Info.Pkg.Imports() {
 		impPkg := pkg.libifier.packageFromPath(imp.Path())
 		if impPkg == nil {
@@ -593,11 +593,11 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncParams() ([]*ast.Field, e
 		}
 		pkgId := ast.NewIdent(imp.Name())
 		f := &ast.Field{
-			Names: []*ast.Ident{ast.NewIdent(fmt.Sprintf("%s_psess", imp.Name()))},
+			Names: []*ast.Ident{ast.NewIdent(fmt.Sprintf("%s_pstate", imp.Name()))},
 			Type: &ast.StarExpr{
 				X: &ast.SelectorExpr{
 					X:   pkgId,
-					Sel: ast.NewIdent("PackageSession"),
+					Sel: ast.NewIdent("PackageState"),
 				},
 			},
 		}
@@ -608,26 +608,26 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncParams() ([]*ast.Field, e
 	return params, nil
 }
 
-func (pkg *LibifyPackage) generateNewPackageSessionFuncBody() ([]ast.Stmt, error) {
+func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) {
 	var body []ast.Stmt
 
-	// Create the package session
-	// psess := &PackageSession{}
+	// Create the package state
+	// pstate := &PackageState{}
 	body = append(body, &ast.AssignStmt{
-		Lhs: []ast.Expr{ast.NewIdent("psess")},
+		Lhs: []ast.Expr{ast.NewIdent("pstate")},
 		Tok: token.DEFINE,
 		Rhs: []ast.Expr{
 			&ast.UnaryExpr{
 				Op: token.AND,
 				X: &ast.CompositeLit{
-					Type: ast.NewIdent("PackageSession"),
+					Type: ast.NewIdent("PackageState"),
 				},
 			},
 		},
 	})
 
-	// Assign the injected package session for all imported packages
-	// psess.foo = foo_psess
+	// Assign the injected package state for all imported packages
+	// pstate.foo = foo_pstate
 	for _, imp := range pkg.Info.Pkg.Imports() {
 		impPkg := pkg.libifier.packageFromPath(imp.Path())
 		if impPkg == nil {
@@ -636,13 +636,13 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncBody() ([]ast.Stmt, error
 		body = append(body, &ast.AssignStmt{
 			Lhs: []ast.Expr{
 				&ast.SelectorExpr{
-					X:   ast.NewIdent("psess"),
+					X:   ast.NewIdent("pstate"),
 					Sel: ast.NewIdent(imp.Name()),
 				},
 			},
 			Tok: token.ASSIGN,
 			Rhs: []ast.Expr{
-				ast.NewIdent(fmt.Sprintf("%s_psess", imp.Name())),
+				ast.NewIdent(fmt.Sprintf("%s_pstate", imp.Name())),
 			},
 		})
 	}
@@ -656,7 +656,7 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncBody() ([]ast.Stmt, error
 			body = append(body, &ast.AssignStmt{
 				Lhs: []ast.Expr{
 					&ast.SelectorExpr{
-						X:   ast.NewIdent("psess"),
+						X:   ast.NewIdent("pstate"),
 						Sel: ast.NewIdent(v.Name()),
 					},
 				},
@@ -666,10 +666,10 @@ func (pkg *LibifyPackage) generateNewPackageSessionFuncBody() ([]ast.Stmt, error
 		}
 	}
 
-	// Finally return the package session
+	// Finally return the package state
 	body = append(body, &ast.ReturnStmt{
 		Results: []ast.Expr{
-			ast.NewIdent("psess"),
+			ast.NewIdent("pstate"),
 		},
 	})
 
@@ -682,7 +682,7 @@ func (l *Libifier) updateVarFuncUsage() error {
 			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
 				case *ast.Ident:
-					// a -> psess.a (only if a is a var or func in the current package)
+					// a -> pstate.a (only if a is a var or func in the current package)
 					use, ok := pkg.Info.Uses[n]
 					if !ok {
 						return true
@@ -694,7 +694,7 @@ func (l *Libifier) updateVarFuncUsage() error {
 							return true
 						}
 						c.Replace(&ast.SelectorExpr{
-							X:   ast.NewIdent("psess"),
+							X:   ast.NewIdent("pstate"),
 							Sel: n,
 						})
 					}
@@ -729,10 +729,10 @@ func (l *Libifier) updateMethodUsage() error {
 
 					if pkg.libifier.methodObjects[use] {
 						if use.Pkg().Path() == pkg.path {
-							n.Args = append([]ast.Expr{ast.NewIdent("psess")}, n.Args...)
+							n.Args = append([]ast.Expr{ast.NewIdent("pstate")}, n.Args...)
 						} else {
 							n.Args = append([]ast.Expr{&ast.SelectorExpr{
-								X:   ast.NewIdent("psess"),
+								X:   ast.NewIdent("pstate"),
 								Sel: ast.NewIdent(use.Pkg().Name()),
 							}}, n.Args...)
 						}
@@ -754,7 +754,7 @@ func (l *Libifier) updateSelectorUsage() error {
 			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
 				case *ast.SelectorExpr:
-					// a.B() -> psess.a.B() (only if a is a package in the deps)
+					// a.B() -> pstate.a.B() (only if a is a package in the deps)
 					packagePath, _, _, _ := progutils.QualifiedIdentifierInfo(n, pkg.Info.Pkg.Path(), l.session.prog)
 					if packagePath == "" {
 						return true
@@ -770,7 +770,7 @@ func (l *Libifier) updateSelectorUsage() error {
 						pkgName := n.X.(*ast.Ident).Name
 						newNode := &ast.SelectorExpr{
 							X: &ast.SelectorExpr{
-								X:   ast.NewIdent("psess"),
+								X:   ast.NewIdent("pstate"),
 								Sel: ast.NewIdent(pkgName),
 							},
 							Sel: n.Sel,

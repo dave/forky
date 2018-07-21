@@ -35,12 +35,12 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": `package main
 		
-					func (psess *PackageSession) main() {
-						psess.
+					func (pstate *PackageState) main() {
+						pstate.
 							a()
 					}
-					func (psess *PackageSession) a() {
-						psess.
+					func (pstate *PackageState) a() {
+						pstate.
 							v++
 						b()
 					}
@@ -50,12 +50,12 @@ func TestAll(t *testing.T) {
 					func c() {}`,
 				"package-session.go": `
 					package main
-					type PackageSession struct {
+					type PackageState struct {
 						v int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
 					}`,
 			},
 		},
@@ -75,11 +75,11 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": `func Foo() {}`,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
 					}`,
 			},
 		},
@@ -87,16 +87,16 @@ func TestAll(t *testing.T) {
 			files:    `type F string; func (f F) Foo() {a++}; var a int`,
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
-				"a.go": `type F string; func (f F) Foo(psess *PackageSession) {
-					psess.a++
+				"a.go": `type F string; func (f F) Foo(pstate *PackageState) {
+					pstate.a++
 				}`,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						a int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
 					}`,
 			},
 		},
@@ -106,12 +106,12 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": ``,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						i int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
 					}`,
 			},
 		},
@@ -121,13 +121,13 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": ``,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						i int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						psess.i = 1
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.i = 1
+						return pstate
 					}`,
 			},
 		},
@@ -137,20 +137,20 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": `
 					func a() int { return 1 }
-					func (psess *PackageSession) c() int { return psess.b }`,
+					func (pstate *PackageState) c() int { return pstate.b }`,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						b int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						psess.b = a()
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.b = a()
+						return pstate
 					}`,
 			},
 		},
 		"libify method": {
-			// TODO: psess.b.a(psess) shouldn't span 2 lines.
+			// TODO: pstate.b.a(pstate) shouldn't span 2 lines.
 			files: `type T struct{}
 				func (T) a() int{ return i }
 				var b = T{}
@@ -164,23 +164,23 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": `type T struct{}
 					
-					func (T) a(psess *PackageSession) int { return psess.i }
+					func (T) a(pstate *PackageState) int { return pstate.i }
 
-					func (psess *PackageSession) d() int {
-						return psess.b.a(psess)
+					func (pstate *PackageState) d() int {
+						return pstate.b.a(pstate)
 					}`,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						b T
 						c int
 						i int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						psess.b = T{}
-						psess.c = psess.
-							b.a(psess)
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.b = T{}
+						pstate.c = pstate.
+							b.a(pstate)
+						return pstate
 					}`,
 			},
 		},
@@ -190,15 +190,15 @@ func TestAll(t *testing.T) {
 			expected: map[string]string{
 				"a.go": ``,
 				"package-session.go": `
-					type PackageSession struct {
+					type PackageState struct {
 						a int
 						b int
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						psess.b = 1
-						psess.a = psess.b
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.b = 1
+						pstate.a = pstate.b
+						return pstate
 					}`,
 			},
 		},
@@ -209,13 +209,13 @@ func TestAll(t *testing.T) {
 				"a.go": ``,
 				"package-session.go": `
 					import "fmt"
-					type PackageSession struct {
+					type PackageState struct {
 						a string
 					}
-					func NewPackageSession() *PackageSession {
-						psess := &PackageSession{}
-						psess.a = fmt.Sprint("")
-						return psess
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.a = fmt.Sprint("")
+						return pstate
 					}`,
 			},
 		},
@@ -227,33 +227,33 @@ func TestAll(t *testing.T) {
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]map[string]string{
 				"a": {
-					"a.go": `func (psess *PackageSession) a(){
-						psess.b.B()
+					"a.go": `func (pstate *PackageState) a(){
+						pstate.b.B()
 					}`,
 					"package-session.go": `
 						import "b"
-						type PackageSession struct {
-							b *b.PackageSession
+						type PackageState struct {
+							b *b.PackageState
 						}
-						func NewPackageSession(b_psess *b.PackageSession) *PackageSession {
-							psess := &PackageSession{}
-							psess.b = b_psess
-							return psess
+						func NewPackageState(b_pstate *b.PackageState) *PackageState {
+							pstate := &PackageState{}
+							pstate.b = b_pstate
+							return pstate
 						}`,
 				},
 				"b": {
-					"b.go": `package b; func (psess *PackageSession) B(){
-							psess.a++
+					"b.go": `package b; func (pstate *PackageState) B(){
+							pstate.a++
 						}`,
 					"package-session.go": `
 						package b 
-						type PackageSession struct {
+						type PackageState struct {
 							a int
 						}
-						func NewPackageSession() *PackageSession {
-							psess := &PackageSession{}
-							psess.a = 1
-							return psess
+						func NewPackageState() *PackageState {
+							pstate := &PackageState{}
+							pstate.a = 1
+							return pstate
 						}`,
 				},
 			},

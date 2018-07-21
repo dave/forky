@@ -336,18 +336,32 @@ func (l *Libifier) findFuncs() error {
 						pkg.methods[n] = true
 						pkg.libifier.methodObjects[def] = true
 						/*
-							var recvObj types.Object
-
-							t := n.Recv.List[0].Type
-
-							switch t := n.Recv.List[0].Type.(type) {
-							case *ast.Ident:
-								recvObj = pkg.Info.Uses[t]
-							case *ast.StarExpr:
-								recvObj = pkg.Info.Uses[t.X]
+							// Print list of types that have methods that need Package Session
+							recvTyp := pkg.Info.Types[n.Recv.List[0].Type].Type
+							var name string
+							for {
+								if p, ok := recvTyp.(*types.Pointer); ok {
+									recvTyp = p.Elem()
+									continue
+								}
+								if n, ok := recvTyp.(*types.Named); ok {
+									name = n.Obj().Pkg().Path() + "..." + n.Obj().Name()
+									recvTyp = n.Underlying()
+									continue
+								}
+								break
 							}
+							if !typesList[recvTyp] {
 
-							fmt.Println("Method:", recvObj.Pkg().Path(), recvObj.Name())
+								typesList[recvTyp] = true
+
+								if name != "" {
+									fmt.Printf("Method: %T %s\n", recvTyp, name)
+								} else {
+									fmt.Printf("Method: %T %s\n", recvTyp, recvTyp.String())
+								}
+
+							}
 						*/
 					} else {
 						// function
@@ -362,6 +376,8 @@ func (l *Libifier) findFuncs() error {
 	}
 	return nil
 }
+
+//var typesList = map[types.Type]bool{}
 
 func (l *Libifier) updateDecls() error {
 	for _, pkg := range l.packages {

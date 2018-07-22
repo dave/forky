@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 
+	"honnef.co/go/tools/ssa"
+
 	"github.com/dave/services/fsutil"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
@@ -36,6 +38,7 @@ type Session struct {
 	out                 io.Writer
 	ParseFilter         func(relpath string, file os.FileInfo) bool
 	prog                *loader.Program
+	ssa                 *ssa.Program
 }
 
 func NewSession(source, destination string) *Session {
@@ -321,6 +324,7 @@ func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(
 	return
 }
 
+// load the program and scan types
 func (s *Session) load() {
 	// save all files to a memfs
 	gopathfs := memfs.New()
@@ -381,6 +385,24 @@ func (s *Session) load() {
 		s.paths[relpath].Packages[pkg.Name()].Files = files
 		s.paths[relpath].Packages[pkg.Name()].Info = info
 	}
+}
+
+// analyze created the ssa program and performs pointer analysis
+func (s *Session) analyze() {
+	/*
+		s.ssa = ssautil.CreateProgram(s.prog, 0)
+
+		prog := ssautil.CreateProgram(l.session.prog, 0)
+		for _, p := range prog.AllPackages() {
+			pkg := s.packageFromPath(p.Pkg.Path())
+			if pkg == nil {
+				continue
+			}
+			p.Build()
+			pkg.ssa = p
+		}
+		l.session.ssa = prog
+	*/
 }
 
 func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {

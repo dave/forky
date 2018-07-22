@@ -23,9 +23,6 @@ func (m Libify) Apply(s *Session) Applier {
 	return Applier{
 		Func: func() {
 
-			// load the program and scan types
-			s.load()
-
 			l := NewLibifier(m, s)
 			if err := l.Run(); err != nil {
 				panic(err)

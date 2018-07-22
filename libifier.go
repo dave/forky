@@ -68,6 +68,10 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 
 func (l *Libifier) Run() error {
 
+	l.session.load()
+
+	l.session.analyze()
+
 	if err := l.scanDeps(); err != nil {
 		return err
 	}
@@ -78,6 +82,10 @@ func (l *Libifier) Run() error {
 	}
 
 	if err := l.findVarUses(); err != nil {
+		return err
+	}
+
+	if err := l.findVarMutations(); err != nil {
 		return err
 	}
 
@@ -241,6 +249,24 @@ func (l *Libifier) findVarUses() error {
 			}, nil)
 		}
 	}
+	return nil
+}
+
+func (l *Libifier) findVarMutations() error {
+	/*
+		for _, pkg := range l.packages {
+			for _, file := range pkg.Files {
+				astutil.Apply(file, func(c *astutil.Cursor) bool {
+					switch decl := c.Node().(type) {
+					case *ast.FuncDecl:
+
+					}
+					return true
+				}, nil)
+			}
+		}
+		return nil
+	*/
 	return nil
 }
 

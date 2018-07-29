@@ -19,18 +19,26 @@ func TestAll(t *testing.T) {
 	tests := map[string]testspec{
 		"callgraph": {
 			files: `package main
-				var v int
+				var i int
+				var j = 1
+				var m map[string]string
+				var n map[string]string
 				func main() {
-					a()
+					pointer_assign(&i)
+					map_update_param(n)
 				}
-				func a() {
-					v++
-					b()
+				func int_assign() {
+					i = 1
 				}
-				func b() {
-					c()
+				func map_update() {
+					m["a"] = "b"
 				}
-				func c() {}`,
+				func map_update_param(v map[string]string) {
+					v["a"] = "b"
+				}
+				func pointer_assign(v *int) {
+					*v = 1
+				}`,
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
 				"a.go": `package main
@@ -260,7 +268,7 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "" // during dev, set this to the name of a test case to just run that single case
+	single := "callgraph" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}
@@ -299,28 +307,8 @@ func runTest(spec testspec) error {
 	s.gopathsrc = "/"
 	s.fs = memfs.New()
 
-	normalize := func(i interface{}) map[string]map[string]string {
-		var m map[string]map[string]string
-		switch v := i.(type) {
-		case map[string]map[string]string:
-			m = v
-		case map[string]string:
-			m = map[string]map[string]string{"a": v}
-		case string:
-			m = map[string]map[string]string{"a": {"a.go": v}}
-		}
-		for path, files := range m {
-			for name, contents := range files {
-				if !strings.HasPrefix(strings.TrimSpace(contents), "package ") {
-					m[path][name] = "package a\n" + contents
-				}
-			}
-		}
-		return m
-	}
-
-	files := normalize(spec.files)
-	expected := normalize(spec.expected)
+	files := normalize("a", spec.files)
+	expected := normalize("a", spec.expected)
 
 	for path, files := range files {
 		for fname, contents := range files {
@@ -393,4 +381,24 @@ func runTest(spec testspec) error {
 	}
 
 	return nil
+}
+
+func normalize(name string, i interface{}) map[string]map[string]string {
+	var m map[string]map[string]string
+	switch v := i.(type) {
+	case map[string]map[string]string:
+		m = v
+	case map[string]string:
+		m = map[string]map[string]string{name: v}
+	case string:
+		m = map[string]map[string]string{name: {name + ".go": v}}
+	}
+	for path, files := range m {
+		for fname, contents := range files {
+			if !strings.HasPrefix(strings.TrimSpace(contents), "package ") {
+				m[path][fname] = "package " + name + "\n" + contents
+			}
+		}
+	}
+	return m
 }

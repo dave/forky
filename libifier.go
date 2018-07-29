@@ -9,12 +9,16 @@ import (
 
 	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/pointer"
+	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 type Libifier struct {
 	libify   Libify
 	session  *Session
 	packages map[string]*LibifyPackage
+	ssa      *ssa.Program
 
 	varObjects    map[types.Object]bool
 	methodObjects map[types.Object]bool
@@ -46,10 +50,14 @@ type LibifyPackage struct {
 	relpath     string
 	path        string
 	sessionFile *ast.File
+	ssa         *ssa.Package
 
 	vars    map[*ast.GenDecl]bool
 	methods map[*ast.FuncDecl]bool
 	funcs   map[*ast.FuncDecl]bool
+
+	varObjects map[types.Object]bool
+	varUsed    map[types.Object]bool
 }
 
 func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *LibifyPackage {
@@ -63,14 +71,15 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 		vars:    map[*ast.GenDecl]bool{},
 		methods: map[*ast.FuncDecl]bool{},
 		funcs:   map[*ast.FuncDecl]bool{},
+
+		varObjects: map[types.Object]bool{},
+		varUsed:    map[types.Object]bool{},
 	}
 }
 
 func (l *Libifier) Run() error {
 
 	l.session.load()
-
-	l.session.analyze()
 
 	if err := l.scanDeps(); err != nil {
 		return err
@@ -82,6 +91,10 @@ func (l *Libifier) Run() error {
 	}
 
 	if err := l.findVarUses(); err != nil {
+		return err
+	}
+
+	if err := l.analyzeSSA(); err != nil {
 		return err
 	}
 
@@ -199,6 +212,7 @@ func (l *Libifier) findVars() error {
 								panic(fmt.Sprintf("can't find %s in defs", id.Name))
 							}
 							pkg.libifier.varObjects[def] = true
+							pkg.varObjects[def] = true
 						}
 					}
 				}
@@ -252,7 +266,140 @@ func (l *Libifier) findVarUses() error {
 	return nil
 }
 
+// analyze created the ssa program and performs pointer analysis
+func (l *Libifier) analyzeSSA() error {
+	l.ssa = ssautil.CreateProgram(l.session.prog, 0)
+	for _, pkg := range l.ssa.AllPackages() {
+		pkg.Build()
+		p := l.packageFromPath(pkg.Pkg.Path())
+		p.ssa = pkg
+	}
+	l.ssa.Build()
+	return nil
+}
+
 func (l *Libifier) findVarMutations() error {
+
+	// See: https://godoc.org/golang.org/x/tools/go/pointer#example-package
+
+	// Make a list of the main packages to feed into the pointer analysis
+	var mains []*ssa.Package
+	for _, p := range l.libify.Packages {
+		if l.packages[p].Name != "main" {
+			continue
+		}
+		mains = append(mains, l.ssa.Package(l.packages[p].Info.Pkg))
+	}
+
+	// Configure the pointer analysis to build a call-graph.
+	config := &pointer.Config{
+		Mains:          mains,
+		BuildCallGraph: true,
+	}
+
+	/*
+		for _, pkg := range l.packages {
+			for decl := range pkg.vars {
+				for _, spec := range decl.Specs {
+					spec := spec.(*ast.ValueSpec)
+					for _, name := range spec.Names {
+						val := pkg.ssa.Var(name.Name)
+						if val == nil {
+							panic("ssa nil " + name.Name)
+						}
+						//fmt.Println("adding query", val)
+						config.AddQuery(val)
+					}
+				}
+			}
+		}
+	*/
+
+	var modified []ssa.Value
+
+	fmt.Println("=== adding queries")
+	for _, pkg := range l.ssa.AllPackages() {
+		for _, m := range pkg.Members {
+			f, ok := m.(*ssa.Function)
+			if !ok {
+				continue
+			}
+			if f.Name() == "init" {
+				continue
+			}
+			var blocks []*ssa.BasicBlock
+			blocks = append(blocks, f.Blocks...)
+			if f.Recover != nil {
+				blocks = append(blocks, f.Recover)
+			}
+			for _, block := range blocks {
+				for _, ins := range block.Instrs {
+					//fmt.Printf("%s %s %T\n", f.Name(), ins.String(), ins)
+					switch ins := ins.(type) {
+					case *ssa.Store:
+						g, ok := ins.Addr.(*ssa.Global)
+						if ok {
+							modified = append(modified, g)
+						}
+						fmt.Println(f.Name(), "adding query store", ins.Addr)
+						config.AddQuery(ins.Addr)
+					case *ssa.MapUpdate:
+						//fmt.Printf("map: %T %s\n", ins.Map, ins.Map.Name())
+						switch m := ins.Map.(type) {
+						case *ssa.Global:
+							fmt.Println(f.Name(), "adding query map (Global)", m)
+							config.AddQuery(m)
+							modified = append(modified, m)
+						case *ssa.UnOp:
+							fmt.Println(f.Name(), "adding query map (UnOp)", m.X)
+							config.AddQuery(m.X)
+							modified = append(modified, m.X)
+						default:
+							fmt.Println(f.Name(), "adding query map (default)", m)
+							config.AddQuery(m)
+						}
+
+					}
+				}
+			}
+		}
+	}
+
+	// Run the pointer analysis.
+	result, err := pointer.Analyze(config)
+	if err != nil {
+		return err // internal error in pointer analysis
+	}
+
+	// Find edges originating from the main package.
+	// By converting to strings, we de-duplicate nodes
+	// representing the same function due to context sensitivity.
+	//callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
+	//caller := edge.Caller.Func
+	//if caller.Pkg.Pkg.Name() == "main" {
+	//fmt.Println(caller, " --> ", edge.Callee.Func)
+	//}
+	//	return nil
+	//})
+
+	fmt.Println("=== Results")
+	for _, q := range result.Queries {
+		for _, label := range q.PointsTo().Labels() {
+			fmt.Printf("%T\n", label.Value())
+			g, ok := label.Value().(*ssa.Global)
+			if ok {
+				modified = append(modified, g)
+			}
+		}
+	}
+
+	fmt.Println("=== Values")
+	for _, v := range modified {
+		v := v.(*ssa.Global)
+		pkg := l.packageFromPath(v.Pkg.Pkg.Path())
+		pkg.varUsed[v.Object()] = true
+	}
+
 	/*
 		for _, pkg := range l.packages {
 			for _, file := range pkg.Files {
@@ -265,7 +412,6 @@ func (l *Libifier) findVarMutations() error {
 				}, nil)
 			}
 		}
-		return nil
 	*/
 	return nil
 }

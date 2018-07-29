@@ -16,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"honnef.co/go/tools/ssa"
-
 	"github.com/dave/services/fsutil"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
@@ -38,7 +36,6 @@ type Session struct {
 	out                 io.Writer
 	ParseFilter         func(relpath string, file os.FileInfo) bool
 	prog                *loader.Program
-	ssa                 *ssa.Program
 }
 
 func NewSession(source, destination string) *Session {
@@ -56,34 +53,13 @@ func NewSession(source, destination string) *Session {
 
 func (s *Session) Run(mutations []Mutator) error {
 
-	rootDir := filepath.Join(s.gopathsrc, s.source)
-
 	var appliers []Applier
 	for _, mutation := range mutations {
 		appliers = append(appliers, mutation.Apply(s))
 	}
 
-	// make list of files by relpath
-	files := map[string]map[string]bool{} // full file path -> true
-
-	if err := fsutil.Walk(s.fs, rootDir, func(fs billy.Filesystem, fpath string, finfo os.FileInfo, err error) error {
-		if finfo == nil {
-			return nil
-		}
-		if !finfo.IsDir() {
-			dir, fname := filepath.Split(fpath)
-			reldir, err := filepath.Rel(rootDir, dir)
-			if err != nil {
-				return err
-			}
-			relpath := dirToPath(reldir)
-			if files[relpath] == nil {
-				files[relpath] = map[string]bool{}
-			}
-			files[relpath][fname] = true
-		}
-		return nil
-	}); err != nil {
+	files, err := s.getFiles()
+	if err != nil {
 		return err
 	}
 
@@ -131,7 +107,7 @@ func (s *Session) Run(mutations []Mutator) error {
 
 		if (applier.Apply != nil || applier.Func != nil) && len(s.paths) == 0 {
 			// If we haven't parsed yet, parse now.
-			if err := s.parse(files, rootDir); err != nil {
+			if err := s.parse(files); err != nil {
 				return err
 			}
 		}
@@ -165,13 +141,47 @@ func (s *Session) Run(mutations []Mutator) error {
 
 	// If we haven't parsed yet, parse now.
 	if len(s.paths) == 0 {
-		s.parse(files, rootDir)
+		if err := s.parse(files); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (s *Session) parse(files map[string]map[string]bool, rootDir string) error {
+func (s *Session) getFiles() (map[string]map[string]bool, error) {
+	rootDir := filepath.Join(s.gopathsrc, s.source)
+
+	// make list of files by relpath
+	files := map[string]map[string]bool{} // full file path -> true
+
+	if err := fsutil.Walk(s.fs, rootDir, func(fs billy.Filesystem, fpath string, finfo os.FileInfo, err error) error {
+		if finfo == nil {
+			return nil
+		}
+		if !finfo.IsDir() {
+			dir, fname := filepath.Split(fpath)
+			reldir, err := filepath.Rel(rootDir, dir)
+			if err != nil {
+				return err
+			}
+			relpath := dirToPath(reldir)
+			if files[relpath] == nil {
+				files[relpath] = map[string]bool{}
+			}
+			files[relpath][fname] = true
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (s *Session) parse(files map[string]map[string]bool) error {
+
+	rootDir := filepath.Join(s.gopathsrc, s.source)
+
 	var count int
 	for relpath := range files {
 
@@ -385,24 +395,6 @@ func (s *Session) load() {
 		s.paths[relpath].Packages[pkg.Name()].Files = files
 		s.paths[relpath].Packages[pkg.Name()].Info = info
 	}
-}
-
-// analyze created the ssa program and performs pointer analysis
-func (s *Session) analyze() {
-	/*
-		s.ssa = ssautil.CreateProgram(s.prog, 0)
-
-		prog := ssautil.CreateProgram(l.session.prog, 0)
-		for _, p := range prog.AllPackages() {
-			pkg := s.packageFromPath(p.Pkg.Path())
-			if pkg == nil {
-				continue
-			}
-			p.Build()
-			pkg.ssa = p
-		}
-		l.session.ssa = prog
-	*/
 }
 
 func readFile(fs billy.Filesystem, fpath string) ([]byte, error) {

@@ -108,11 +108,27 @@ func TestAll(t *testing.T) {
 					}`,
 			},
 		},
-		"libify var": {
-			files:    `var i int`,
-			mutators: Libify{[]string{"a"}},
+		"libify var unused": {
+			files:    `func main(){}; var i int`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": ``,
+				"main.go": `func main(){}; var i int`,
+				"package-state.go": `
+					type PackageState struct {
+					}
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
+					}`,
+			},
+		},
+		"libify var used": {
+			files:    `func main(){}; func a(){ i = 1 }; var i int`,
+			mutators: Libify{[]string{"main"}},
+			expected: map[string]string{
+				"main.go": `func main(){}; func (pstate *PackageState) a() {
+					pstate.i = 1
+				}`,
 				"package-state.go": `
 					type PackageState struct {
 						i int
@@ -124,10 +140,13 @@ func TestAll(t *testing.T) {
 			},
 		},
 		"libify var init": {
-			files:    `var i = 1`,
-			mutators: Libify{[]string{"a"}},
+			files:    `func main(){}; var i, j = 1, 2; func a(){ i = 2; print(j) }`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": ``,
+				"main.go": `func main(){}; var j = 2; func (pstate *PackageState) a() {
+					pstate.i = 2
+					print(j)
+				}`,
 				"package-state.go": `
 					type PackageState struct {
 						i int
@@ -140,10 +159,11 @@ func TestAll(t *testing.T) {
 			},
 		},
 		"libify func": {
-			files:    `func a() int{return 1}; func c() int {return b}; var b = a()`,
-			mutators: Libify{[]string{"a"}},
+			files:    `func main(){}; func a() int{return 1}; func c() int {return b}; var b = a()`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": `
+				"main.go": `
+					func main(){}
 					func a() int { return 1 }
 					func (pstate *PackageState) c() int { return pstate.b }`,
 				"package-state.go": `
@@ -268,7 +288,7 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "libify other methods" // during dev, set this to the name of a test case to just run that single case
+	single := "libify var init" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}

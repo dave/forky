@@ -24,8 +24,8 @@ type Libifier struct {
 	methodObjects map[types.Object]bool
 	funcObjects   map[types.Object]bool
 
-	varUses    map[types.Object]map[types.Object]bool
-	funcUses   map[types.Object]map[types.Object]bool
+	varUses    map[types.Object]map[types.Object]bool // func object -> var objects
+	funcUses   map[types.Object]map[types.Object]bool // func object -> func objects
 	varMutated map[types.Object]bool
 }
 
@@ -58,8 +58,16 @@ type LibifyPackage struct {
 	methods map[*ast.FuncDecl]bool
 	funcs   map[*ast.FuncDecl]bool
 
+	moved []declspec
+
 	varObjects map[types.Object]bool
 	varMutated map[types.Object]bool
+}
+
+type declspec struct {
+	typ    ast.Expr
+	names  []*ast.Ident
+	values []ast.Expr
 }
 
 func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *LibifyPackage {
@@ -104,6 +112,11 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
+	fmt.Println("mutated vars:")
+	for v := range l.varMutated {
+		fmt.Println(v.Name())
+	}
+
 	//if err := l.generateCallGraph(); err != nil {
 	//	return err
 	//}
@@ -119,7 +132,7 @@ func (l *Libifier) Run() error {
 	}
 
 	// creates package-state.go
-	if err := l.createSessionFiles(); err != nil {
+	if err := l.createStateFiles(); err != nil {
 		return err
 	}
 
@@ -145,9 +158,6 @@ func (l *Libifier) Run() error {
 
 func (l *Libifier) includeVar(ob types.Object) bool {
 	if !l.varObjects[ob] {
-		return false
-	}
-	if u, ok := l.varUses[ob]; !ok || u == nil || len(u) == 0 {
 		return false
 	}
 	if !l.varMutated[ob] {
@@ -527,9 +537,14 @@ func (l *Libifier) findFuncs() error {
 						}
 						done[obj] = true
 
-						if l.includeVar(obj) {
-							found = true
-							return
+						uses := l.varUses[obj]
+						if uses != nil {
+							for v := range uses {
+								if l.includeVar(v) {
+									found = true
+									return
+								}
+							}
 						}
 
 						callees, ok := l.funcUses[obj]
@@ -606,20 +621,35 @@ func (l *Libifier) updateDecls() error {
 					}
 					var specs []ast.Spec
 					for _, spec := range n.Specs {
+						spec := spec.(*ast.ValueSpec)
 						var names []*ast.Ident
-						for _, name := range spec.(*ast.ValueSpec).Names {
+						var values []ast.Expr
+						var namesMoved []*ast.Ident
+						var valuesMoved []ast.Expr
+						for i, name := range spec.Names {
 							ob := pkg.Info.Defs[name]
 							if !l.includeVar(ob) {
 								// definitions of vars that are included in the package state should
 								// be deleted, so only append the name if it's not included
 								names = append(names, name)
+								values = append(values, spec.Values[i])
+							} else {
+								namesMoved = append(namesMoved, name)
+								valuesMoved = append(valuesMoved, spec.Values[i])
 							}
 						}
 						if len(names) > 0 {
-							spec.(*ast.ValueSpec).Names = names
+							spec.Names = names
+							spec.Values = values
 							specs = append(specs, spec)
-						} else {
-							// don't append this spec
+						}
+						if len(namesMoved) > 0 {
+							ds := declspec{
+								names:  namesMoved,
+								values: valuesMoved,
+								typ:    spec.Type,
+							}
+							pkg.moved = append(pkg.moved, ds)
 						}
 					}
 					if len(specs) > 0 {
@@ -664,7 +694,7 @@ func (l *Libifier) updateDecls() error {
 	return nil
 }
 
-func (l *Libifier) createSessionFiles() error {
+func (l *Libifier) createStateFiles() error {
 	for _, pkg := range l.packages {
 
 		pkg.sessionFile = &ast.File{
@@ -749,49 +779,35 @@ func (pkg *LibifyPackage) generatePackageStateImportFields() ([]*ast.Field, erro
 
 func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) {
 	var fields []*ast.Field
-	for decl := range pkg.vars {
-		for _, spec := range decl.Specs {
-			spec := spec.(*ast.ValueSpec)
-
-			// some of the names may not be included, so make a list of the names that will be included
-			var names []*ast.Ident
-			for _, id := range spec.Names {
-				ob := pkg.Info.Defs[id]
-				if pkg.libifier.includeVar(ob) {
-					names = append(names, id)
-				}
+	for _, ds := range pkg.moved {
+		if ds.typ != nil {
+			// if a type is specified, we can add the names as one field
+			infoType := pkg.Info.Types[ds.typ]
+			if infoType.Type == nil {
+				return nil, fmt.Errorf("no type for %v in %s", ds.names, pkg.relpath)
 			}
-
-			if spec.Type != nil {
-				// if a type is specified, we can add the names as one field
-				infoType := pkg.Info.Types[spec.Type]
-				if infoType.Type == nil {
-					return nil, fmt.Errorf("no type for %v in %s", names, pkg.relpath)
-				}
-				f := &ast.Field{
-					Names: names,
-					Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
-				}
-				fields = append(fields, f)
+			f := &ast.Field{
+				Names: ds.names,
+				Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
+			}
+			fields = append(fields, f)
+			continue
+		}
+		// if spec.Type is nil, we must separate the name / value pairs
+		for i, name := range ds.names {
+			if name.Name == "_" {
 				continue
 			}
-			// if spec.Type is nil, we must separate the name / value pairs
-			// TODO: determine type from value (will need to scan with type checker)
-			for i, name := range names {
-				if name.Name == "_" {
-					continue
-				}
-				value := spec.Values[i]
-				infoType := pkg.Info.Types[value]
-				if infoType.Type == nil {
-					return nil, fmt.Errorf("no type for " + name.Name + " in " + pkg.relpath)
-				}
-				f := &ast.Field{
-					Names: []*ast.Ident{name},
-					Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
-				}
-				fields = append(fields, f)
+			value := ds.values[i]
+			infoType := pkg.Info.Types[value]
+			if infoType.Type == nil {
+				return nil, fmt.Errorf("no type for " + name.Name + " in " + pkg.relpath)
 			}
+			f := &ast.Field{
+				Names: []*ast.Ident{name},
+				Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
+			}
+			fields = append(fields, f)
 		}
 	}
 	return fields, nil
@@ -902,6 +918,9 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) 
 			if v.Name() == "_" {
 				continue
 			}
+			if !pkg.libifier.includeVar(v) {
+				continue
+			}
 			body = append(body, &ast.AssignStmt{
 				Lhs: []ast.Expr{
 					&ast.SelectorExpr{
@@ -936,7 +955,7 @@ func (l *Libifier) updateVarFuncUsage() error {
 					if !ok {
 						return true
 					}
-					if pkg.libifier.varObjects[use] || pkg.libifier.funcObjects[use] {
+					if pkg.libifier.includeVar(use) || pkg.libifier.funcObjects[use] {
 						if use.Pkg().Path() != pkg.path {
 							// This is only for if the object is in the local package. Without this,
 							// we trigger on the "a" part of foo.a where foo is another package.

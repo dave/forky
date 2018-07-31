@@ -60,6 +60,19 @@ func TestUsed(t *testing.T) {
 				func main(){ b[0] = "c" }`,
 			expected: []string{"b"},
 		},
+		"increment": {
+			files: `var a, b int
+				func main(){ b++ }`,
+			expected: []string{"b"},
+		},
+		"method": {
+			files: `var a, b int
+				func main(){}
+				type T struct{}
+				func (T) F() { a = 1 }
+				`,
+			expected: []string{"a"},
+		},
 	}
 
 	single := ""

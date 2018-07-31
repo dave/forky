@@ -118,7 +118,7 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	// creates package-session.go
+	// creates package-state.go
 	if err := l.createSessionFiles(); err != nil {
 		return err
 	}
@@ -337,12 +337,28 @@ func (l *Libifier) findVarMutations() error {
 	var modified []ssa.Value
 
 	for _, pkg := range l.ssa.AllPackages() {
-		for _, m := range pkg.Members {
-			f, ok := m.(*ssa.Function)
-			if !ok {
-				continue
+		type info struct {
+			*ssa.Function
+			method bool
+		}
+		var functions []info
+
+		for _, member := range pkg.Members {
+			switch m := member.(type) {
+			case *ssa.Function:
+				functions = append(functions, info{m, false})
+			case *ssa.Type:
+				n := m.Type().(*types.Named)
+				for i := 0; i < n.NumMethods(); i++ {
+					f := l.ssa.LookupMethod(n, pkg.Pkg, n.Method(i).Name())
+					functions = append(functions, info{f, true})
+				}
 			}
-			if f.Name() == "init" {
+		}
+
+		for _, f := range functions {
+			if f.Name() == "init" && !f.method {
+				// skip init function (but not methods called init!)
 				continue
 			}
 			var blocks []*ssa.BasicBlock
@@ -585,10 +601,34 @@ func (l *Libifier) updateDecls() error {
 			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
 				switch n := c.Node().(type) {
 				case *ast.GenDecl:
-					if pkg.vars[n] {
-						// remove all package-level var declarations
+					if !pkg.vars[n] {
+						break
+					}
+					var specs []ast.Spec
+					for _, spec := range n.Specs {
+						var names []*ast.Ident
+						for _, name := range spec.(*ast.ValueSpec).Names {
+							ob := pkg.Info.Defs[name]
+							if !l.includeVar(ob) {
+								// definitions of vars that are included in the package state should
+								// be deleted, so only append the name if it's not included
+								names = append(names, name)
+							}
+						}
+						if len(names) > 0 {
+							spec.(*ast.ValueSpec).Names = names
+							specs = append(specs, spec)
+						} else {
+							// don't append this spec
+						}
+					}
+					if len(specs) > 0 {
+						n.Specs = specs
+					} else {
+						// no specs -> delete node
 						c.Delete()
 					}
+
 				case *ast.FuncDecl:
 					switch {
 					case pkg.methods[n]:
@@ -630,7 +670,7 @@ func (l *Libifier) createSessionFiles() error {
 		pkg.sessionFile = &ast.File{
 			Name: ast.NewIdent(pkg.Info.Pkg.Name()),
 		}
-		pkg.Files["package-session.go"] = pkg.sessionFile
+		pkg.Files["package-state.go"] = pkg.sessionFile
 
 		if err := pkg.addPackageStateStruct(); err != nil {
 			return err
@@ -712,14 +752,24 @@ func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) 
 	for decl := range pkg.vars {
 		for _, spec := range decl.Specs {
 			spec := spec.(*ast.ValueSpec)
+
+			// some of the names may not be included, so make a list of the names that will be included
+			var names []*ast.Ident
+			for _, id := range spec.Names {
+				ob := pkg.Info.Defs[id]
+				if pkg.libifier.includeVar(ob) {
+					names = append(names, id)
+				}
+			}
+
 			if spec.Type != nil {
 				// if a type is specified, we can add the names as one field
 				infoType := pkg.Info.Types[spec.Type]
 				if infoType.Type == nil {
-					return nil, fmt.Errorf("no type for %v in %s", spec.Names, pkg.relpath)
+					return nil, fmt.Errorf("no type for %v in %s", names, pkg.relpath)
 				}
 				f := &ast.Field{
-					Names: spec.Names,
+					Names: names,
 					Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
 				}
 				fields = append(fields, f)
@@ -727,8 +777,7 @@ func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) 
 			}
 			// if spec.Type is nil, we must separate the name / value pairs
 			// TODO: determine type from value (will need to scan with type checker)
-			for i := range spec.Names {
-				name := spec.Names[i]
+			for i, name := range names {
 				if name.Name == "_" {
 					continue
 				}

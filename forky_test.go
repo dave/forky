@@ -56,7 +56,7 @@ func TestAll(t *testing.T) {
 						c()
 					}
 					func c() {}`,
-				"package-session.go": `
+				"package-state.go": `
 					package main
 					type PackageState struct {
 						v int
@@ -78,11 +78,11 @@ func TestAll(t *testing.T) {
 			expected: `var a = "bar"`,
 		},
 		"libify simple": {
-			files:    `func Foo() {}`,
-			mutators: Libify{[]string{"a"}},
+			files:    `func main(){}; func Foo() {}`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": `func Foo() {}`,
-				"package-session.go": `
+				"main.go": `func main(){}; func Foo() {}`,
+				"package-state.go": `
 					type PackageState struct {
 					}
 					func NewPackageState() *PackageState {
@@ -92,13 +92,13 @@ func TestAll(t *testing.T) {
 			},
 		},
 		"libify other methods": {
-			files:    `type F string; func (f F) Foo() {a++}; var a int`,
-			mutators: Libify{[]string{"a"}},
+			files:    `func main(){}; type F string; func (F) Foo() { a++ }; var a int`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": `type F string; func (f F) Foo(pstate *PackageState) {
+				"main.go": `func main(){}; type F string; func (F) Foo(pstate *PackageState) {
 					pstate.a++
 				}`,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						a int
 					}
@@ -113,7 +113,7 @@ func TestAll(t *testing.T) {
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
 				"a.go": ``,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						i int
 					}
@@ -128,7 +128,7 @@ func TestAll(t *testing.T) {
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
 				"a.go": ``,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						i int
 					}
@@ -146,7 +146,7 @@ func TestAll(t *testing.T) {
 				"a.go": `
 					func a() int { return 1 }
 					func (pstate *PackageState) c() int { return pstate.b }`,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						b int
 					}
@@ -177,7 +177,7 @@ func TestAll(t *testing.T) {
 					func (pstate *PackageState) d() int {
 						return pstate.b.a(pstate)
 					}`,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						b T
 						c int
@@ -197,7 +197,7 @@ func TestAll(t *testing.T) {
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
 				"a.go": ``,
-				"package-session.go": `
+				"package-state.go": `
 					type PackageState struct {
 						a int
 						b int
@@ -215,7 +215,7 @@ func TestAll(t *testing.T) {
 			mutators: Libify{[]string{"a"}},
 			expected: map[string]string{
 				"a.go": ``,
-				"package-session.go": `
+				"package-state.go": `
 					import "fmt"
 					type PackageState struct {
 						a string
@@ -238,7 +238,7 @@ func TestAll(t *testing.T) {
 					"a.go": `func (pstate *PackageState) a(){
 						pstate.b.B()
 					}`,
-					"package-session.go": `
+					"package-state.go": `
 						import "b"
 						type PackageState struct {
 							b *b.PackageState
@@ -253,7 +253,7 @@ func TestAll(t *testing.T) {
 					"b.go": `package b; func (pstate *PackageState) B(){
 							pstate.a++
 						}`,
-					"package-session.go": `
+					"package-state.go": `
 						package b 
 						type PackageState struct {
 							a int
@@ -268,7 +268,7 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "" // during dev, set this to the name of a test case to just run that single case
+	single := "libify other methods" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}
@@ -317,8 +317,8 @@ func runTest(spec testspec) error {
 	s.gopathsrc = "/"
 	s.fs = memfs.New()
 
-	files := normalize("a", spec.files)
-	expected := normalize("a", spec.expected)
+	files := normalize("main", spec.files)
+	expected := normalize("main", spec.expected)
 
 	for path, files := range files {
 		for fname, contents := range files {

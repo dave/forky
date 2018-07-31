@@ -6,6 +6,7 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -18,11 +19,10 @@ import (
 func TestAll(t *testing.T) {
 	tests := map[string]testspec{
 		"callgraph": {
+			skip: true,
 			files: `package main
-				var i int
-				var j = 1
-				var m map[string]string
-				var n map[string]string
+				var i, j int
+				var m, n map[string]string
 				func main() {
 					pointer_assign(&i)
 					map_update_param(n)
@@ -268,20 +268,30 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "callgraph" // during dev, set this to the name of a test case to just run that single case
+	single := "" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}
 	}
 
-	var skipped bool
+	type named struct {
+		testspec
+		name string
+	}
+	var ordered []named
 	for name, spec := range tests {
+		ordered = append(ordered, named{spec, name})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].name < ordered[j].name })
+
+	var skipped bool
+	for _, spec := range ordered {
 		if spec.skip {
 			skipped = true
 			continue
 		}
-		if err := runTest(spec); err != nil {
-			t.Fatalf("%s: %v", name, err)
+		if err := runTest(spec.testspec); err != nil {
+			t.Fatalf("%s: %v", spec.name, err)
 			return
 		}
 	}

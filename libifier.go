@@ -24,8 +24,9 @@ type Libifier struct {
 	methodObjects map[types.Object]bool
 	funcObjects   map[types.Object]bool
 
-	varUses  map[types.Object]map[types.Object]bool
-	funcUses map[types.Object]map[types.Object]bool
+	varUses    map[types.Object]map[types.Object]bool
+	funcUses   map[types.Object]map[types.Object]bool
+	varMutated map[types.Object]bool
 }
 
 func NewLibifier(l Libify, s *Session) *Libifier {
@@ -38,8 +39,9 @@ func NewLibifier(l Libify, s *Session) *Libifier {
 		methodObjects: map[types.Object]bool{},
 		funcObjects:   map[types.Object]bool{},
 
-		varUses:  map[types.Object]map[types.Object]bool{},
-		funcUses: map[types.Object]map[types.Object]bool{},
+		varUses:    map[types.Object]map[types.Object]bool{},
+		funcUses:   map[types.Object]map[types.Object]bool{},
+		varMutated: map[types.Object]bool{},
 	}
 }
 
@@ -57,7 +59,7 @@ type LibifyPackage struct {
 	funcs   map[*ast.FuncDecl]bool
 
 	varObjects map[types.Object]bool
-	varUsed    map[types.Object]bool
+	varMutated map[types.Object]bool
 }
 
 func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *LibifyPackage {
@@ -73,7 +75,7 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 		funcs:   map[*ast.FuncDecl]bool{},
 
 		varObjects: map[types.Object]bool{},
-		varUsed:    map[types.Object]bool{},
+		varMutated: map[types.Object]bool{},
 	}
 }
 
@@ -139,6 +141,19 @@ func (l *Libifier) Run() error {
 	}
 
 	return nil
+}
+
+func (l *Libifier) includeVar(ob types.Object) bool {
+	if !l.varObjects[ob] {
+		return false
+	}
+	if u, ok := l.varUses[ob]; !ok || u == nil || len(u) == 0 {
+		return false
+	}
+	if !l.varMutated[ob] {
+		return false
+	}
+	return true
 }
 
 func (l *Libifier) scanDeps() error {
@@ -272,6 +287,9 @@ func (l *Libifier) analyzeSSA() error {
 	for _, pkg := range l.ssa.AllPackages() {
 		pkg.Build()
 		p := l.packageFromPath(pkg.Pkg.Path())
+		if p == nil {
+			panic(fmt.Sprintf("package %s not found", pkg.Pkg.Path()))
+		}
 		p.ssa = pkg
 	}
 	l.ssa.Build()
@@ -295,6 +313,7 @@ func (l *Libifier) findVarMutations() error {
 	config := &pointer.Config{
 		Mains:          mains,
 		BuildCallGraph: true,
+		Reflection:     true,
 	}
 
 	/*
@@ -317,7 +336,6 @@ func (l *Libifier) findVarMutations() error {
 
 	var modified []ssa.Value
 
-	fmt.Println("=== adding queries")
 	for _, pkg := range l.ssa.AllPackages() {
 		for _, m := range pkg.Members {
 			f, ok := m.(*ssa.Function)
@@ -334,31 +352,39 @@ func (l *Libifier) findVarMutations() error {
 			}
 			for _, block := range blocks {
 				for _, ins := range block.Instrs {
-					//fmt.Printf("%s %s %T\n", f.Name(), ins.String(), ins)
+
+					action := func(v ssa.Value) {
+						switch v := v.(type) {
+						case *ssa.Global:
+							config.AddQuery(v)
+							modified = append(modified, v)
+						case *ssa.UnOp:
+							if v.Op != token.MUL {
+								panic(fmt.Sprintf("UnOp without *: %v", v.Op))
+							}
+							config.AddQuery(v.X)
+							switch x := v.X.(type) {
+							case *ssa.Global:
+								modified = append(modified, x)
+							}
+						default:
+							config.AddQuery(v)
+						}
+					}
+
 					switch ins := ins.(type) {
 					case *ssa.Store:
-						g, ok := ins.Addr.(*ssa.Global)
-						if ok {
-							modified = append(modified, g)
-						}
-						fmt.Println(f.Name(), "adding query store", ins.Addr)
-						config.AddQuery(ins.Addr)
+						action(ins.Addr)
 					case *ssa.MapUpdate:
-						//fmt.Printf("map: %T %s\n", ins.Map, ins.Map.Name())
-						switch m := ins.Map.(type) {
-						case *ssa.Global:
-							fmt.Println(f.Name(), "adding query map (Global)", m)
-							config.AddQuery(m)
-							modified = append(modified, m)
-						case *ssa.UnOp:
-							fmt.Println(f.Name(), "adding query map (UnOp)", m.X)
-							config.AddQuery(m.X)
-							modified = append(modified, m.X)
-						default:
-							fmt.Println(f.Name(), "adding query map (default)", m)
-							config.AddQuery(m)
-						}
-
+						action(ins.Map)
+					case *ssa.IndexAddr:
+						action(ins.X)
+					case *ssa.UnOp:
+						fmt.Printf("ins.(type): %T %v\n", ins, ins.Op)
+					case *ssa.Call, *ssa.Return:
+						// noop
+					default:
+						fmt.Printf("ins.(type): %T\n", ins)
 					}
 				}
 			}
@@ -371,33 +397,36 @@ func (l *Libifier) findVarMutations() error {
 		return err // internal error in pointer analysis
 	}
 
-	// Find edges originating from the main package.
-	// By converting to strings, we de-duplicate nodes
-	// representing the same function due to context sensitivity.
-	//callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
-	//caller := edge.Caller.Func
-	//if caller.Pkg.Pkg.Name() == "main" {
-	//fmt.Println(caller, " --> ", edge.Callee.Func)
-	//}
-	//	return nil
-	//})
-
-	fmt.Println("=== Results")
 	for _, q := range result.Queries {
 		for _, label := range q.PointsTo().Labels() {
-			fmt.Printf("%T\n", label.Value())
-			g, ok := label.Value().(*ssa.Global)
-			if ok {
-				modified = append(modified, g)
+			switch v := label.Value().(type) {
+			case *ssa.Global:
+				modified = append(modified, v)
+			case *ssa.MakeMap:
+				// with maps, we get the makemap instruction where the map is created. To link this
+				// to a Global we have to look in the Referrers list for a Store to a Global.
+				for _, r := range *v.Referrers() {
+					switch r := r.(type) {
+					case *ssa.Store:
+						switch addr := r.Addr.(type) {
+						case *ssa.Global:
+							modified = append(modified, addr)
+						}
+					}
+				}
 			}
 		}
 	}
 
-	fmt.Println("=== Values")
 	for _, v := range modified {
-		v := v.(*ssa.Global)
-		pkg := l.packageFromPath(v.Pkg.Pkg.Path())
-		pkg.varUsed[v.Object()] = true
+		switch v := v.(type) {
+		case *ssa.Global:
+			l.varMutated[v.Object()] = true
+			pkg := l.packageFromPath(v.Pkg.Pkg.Path())
+			pkg.varMutated[v.Object()] = true
+		default:
+			panic(fmt.Sprintf("unsupported type in modified %T", v))
+		}
 	}
 
 	/*
@@ -482,8 +511,7 @@ func (l *Libifier) findFuncs() error {
 						}
 						done[obj] = true
 
-						uses := l.varUses[obj]
-						if uses != nil && len(uses) > 0 {
+						if l.includeVar(obj) {
 							found = true
 							return
 						}

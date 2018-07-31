@@ -31,14 +31,38 @@ func TestUsed(t *testing.T) {
 			expected: []string{"a"},
 		},
 		"map pointer": {
-			files: `var a, b map[string]string
+			files: `var a = map[string]string{}
+				var b = map[string]string{}
 				func main(){ f(b) }
 				func f(v map[string]string){ v["1"] = "1" }`,
 			expected: []string{"b"},
 		},
+		"map pointer 2": {
+			files: `var a = map[string]string{}
+				var b = map[string]string{}
+				func main(){ f(&a) }
+				func f(v *map[string]string){ (*v)["1"] = "1" }`,
+			expected: []string{"a"},
+		},
+		"slice": {
+			files: `var a = []string{"a"}
+				var b = []string{"b"}
+				func main(){ a[0] = "c" }`,
+			expected: []string{"a"},
+		},
+		"slice 2": {
+			files: `var a, b []string
+				func main(){ a[0] = "c" }`,
+			expected: []string{"a"},
+		},
+		"array": {
+			files: `var a, b [5]string
+				func main(){ b[0] = "c" }`,
+			expected: []string{"b"},
+		},
 	}
 
-	single := "map pointer"
+	single := ""
 
 	if single != "" {
 		tests = map[string]usedspec{single: tests[single]}
@@ -112,7 +136,7 @@ func runUsedTest(spec usedspec) error {
 	pkg := l.packages["main"]
 
 	var found []string
-	for k := range pkg.varUsed {
+	for k := range pkg.varMutated {
 		found = append(found, k.Name())
 	}
 	sort.Strings(found)

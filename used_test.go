@@ -73,6 +73,14 @@ func TestUsed(t *testing.T) {
 				`,
 			expected: []string{"a"},
 		},
+		"method pointer": {
+			files: `var a, b int
+				func main(){}
+				type T struct{}
+				func (*T) F() { a = 1 }
+				`,
+			expected: []string{"a"},
+		},
 	}
 
 	single := ""

@@ -89,25 +89,33 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 
 func (l *Libifier) Run() error {
 
+	fmt.Println("")
+
+	fmt.Println("load()")
 	l.session.load()
 
+	fmt.Println("scanDeps()")
 	if err := l.scanDeps(); err != nil {
 		return err
 	}
 
+	fmt.Println("findVars()")
 	// finds all package level vars, populates vars, varObjects
 	if err := l.findVars(); err != nil {
 		return err
 	}
 
+	fmt.Println("findVarUses()")
 	if err := l.findVarUses(); err != nil {
 		return err
 	}
 
+	fmt.Println("analyzeSSA")
 	if err := l.analyzeSSA(); err != nil {
 		return err
 	}
 
+	fmt.Println("findVarMutations")
 	if err := l.findVarMutations(); err != nil {
 		return err
 	}
@@ -298,7 +306,8 @@ func (l *Libifier) analyzeSSA() error {
 		pkg.Build()
 		p := l.packageFromPath(pkg.Pkg.Path())
 		if p == nil {
-			panic(fmt.Sprintf("package %s not found", pkg.Pkg.Path()))
+			continue
+			//panic(fmt.Sprintf("package %s not found", pkg.Pkg.Path()))
 		}
 		p.ssa = pkg
 	}
@@ -358,15 +367,28 @@ func (l *Libifier) findVarMutations() error {
 			case *ssa.Function:
 				functions = append(functions, info{m, false})
 			case *ssa.Type:
-				n := m.Type().(*types.Named)
-				for i := 0; i < n.NumMethods(); i++ {
-					f := l.ssa.LookupMethod(n, pkg.Pkg, n.Method(i).Name())
-					functions = append(functions, info{f, true})
+				action := func(t types.Type) {
+					ms := l.ssa.MethodSets.MethodSet(t)
+					for i := 0; i < ms.Len(); i++ {
+						f := l.ssa.MethodValue(ms.At(i))
+						//f := l.ssa.LookupMethod(sel.Recv(), sel.Obj().Pkg(), sel.Obj().(*types.Func).Name())
+						functions = append(functions, info{f, true})
+					}
 				}
+				t, ok := m.Type().(*types.Named)
+				if !ok {
+					// TODO: not a named type - don't scan methods?
+					break
+				}
+				action(t) // TODO: Does it do pointer methods too?
+				//action(types.NewPointer(t))
 			}
 		}
 
 		for _, f := range functions {
+			if f.Function == nil {
+				continue
+			}
 			if f.Name() == "init" && !f.method {
 				// skip init function (but not methods called init!)
 				continue
@@ -406,11 +428,11 @@ func (l *Libifier) findVarMutations() error {
 					case *ssa.IndexAddr:
 						action(ins.X)
 					case *ssa.UnOp:
-						fmt.Printf("ins.(type): %T %v\n", ins, ins.Op)
+						//fmt.Printf("ins.(type): %T %v\n", ins, ins.Op)
 					case *ssa.Call, *ssa.Return:
 						// noop
 					default:
-						fmt.Printf("ins.(type): %T\n", ins)
+						//fmt.Printf("ins.(type): %T\n", ins)
 					}
 				}
 			}
@@ -418,10 +440,12 @@ func (l *Libifier) findVarMutations() error {
 	}
 
 	// Run the pointer analysis.
+	fmt.Print("pointer.Analyze...")
 	result, err := pointer.Analyze(config)
 	if err != nil {
 		return err // internal error in pointer analysis
 	}
+	fmt.Println(" done")
 
 	for _, q := range result.Queries {
 		for _, label := range q.PointsTo().Labels() {
@@ -447,8 +471,11 @@ func (l *Libifier) findVarMutations() error {
 	for _, v := range modified {
 		switch v := v.(type) {
 		case *ssa.Global:
-			l.varMutated[v.Object()] = true
 			pkg := l.packageFromPath(v.Pkg.Pkg.Path())
+			if pkg == nil {
+				continue
+			}
+			l.varMutated[v.Object()] = true
 			pkg.varMutated[v.Object()] = true
 		default:
 			panic(fmt.Sprintf("unsupported type in modified %T", v))

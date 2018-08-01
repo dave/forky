@@ -158,65 +158,147 @@ func TestAll(t *testing.T) {
 					}`,
 			},
 		},
-		"libify func": {
+		"libify func unused": {
 			files:    `func main(){}; func a() int{return 1}; func c() int {return b}; var b = a()`,
 			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
 				"main.go": `
 					func main(){}
 					func a() int { return 1 }
-					func (pstate *PackageState) c() int { return pstate.b }`,
+					func c() int { return b }
+					var b = a()`,
 				"package-state.go": `
 					type PackageState struct {
-						b int
 					}
 					func NewPackageState() *PackageState {
 						pstate := &PackageState{}
-						pstate.b = a()
+						return pstate
+					}`,
+			},
+		},
+		"libify func used": {
+			// only a is written to... b is unchanged so remains package-level
+			files: `
+				func main(){}
+				func f1() int { return 1 }
+				func f2() int { return a }
+				var a, b = f1(), 1
+				func f3(){ a++ }
+				func f4() int { return b }`,
+			mutators: Libify{[]string{"main"}},
+			expected: map[string]string{
+				"main.go": `
+					func main(){}
+					func f1() int { return 1 }
+					func (pstate *PackageState) f2() int { return pstate.a }
+					var b = 1
+
+					func (pstate *PackageState) f3() {
+						pstate.a++
+					}
+					func f4() int { return b }`,
+				"package-state.go": `
+					type PackageState struct {
+						a int
+					}
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.a = f1()
 						return pstate
 					}`,
 			},
 		},
 		"libify method": {
-			// TODO: pstate.b.a(pstate) shouldn't span 2 lines.
-			files: `type T struct{}
-				func (T) a() int{ return i }
-				var b = T{}
-				var c = b.a()
-				var i int
-				func d() int {
-					return b.a()
+			// TODO: pstate... shouldn't span 2 lines.
+			files: `
+				func main(){}
+				type T string
+				func (T) m1() int{ return v3 }
+				var v1 = T("1")
+				var v2 = v1.m1()
+				var v3 int
+				func f1() int {
+					return v1.m1()
+				}
+				func f2() {
+					v1 = T("2")
+					v2++
+					v3--
 				}
 				`,
-			mutators: Libify{[]string{"a"}},
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": `type T struct{}
+				"main.go": `
+					func main(){}
+					type T string
 					
-					func (T) a(pstate *PackageState) int { return pstate.i }
+					func (T) m1(pstate *PackageState) int { return pstate.v3 }
 
-					func (pstate *PackageState) d() int {
-						return pstate.b.a(pstate)
+					func (pstate *PackageState) f1() int {
+						return pstate.v1.m1(pstate)
+					}
+					func (pstate *PackageState) f2() {
+						pstate.
+							v1 = T("2")
+						pstate.
+							v2++
+						pstate.
+							v3--
 					}`,
 				"package-state.go": `
 					type PackageState struct {
-						b T
-						c int
-						i int
+						v1 T
+						v2 int
+						v3 int
 					}
 					func NewPackageState() *PackageState {
 						pstate := &PackageState{}
-						pstate.b = T{}
-						pstate.c = pstate.
-							b.a(pstate)
+						pstate.v1 = T("1")
+						pstate.v2 = pstate.
+							v1.m1(pstate)
 						return pstate
 					}`,
 			},
 		},
 		"libify var init order": {
-			files:    `var a = b; var b = 1`,
-			mutators: Libify{[]string{"a"}},
+			files:    `func main(){}; var a = b; var b = 1; func f1() {a, b = 1, 2}`,
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]string{
-				"a.go": ``,
+				"main.go": `
+					func main(){}
+
+					func (pstate *PackageState) f1() {
+						pstate.a, pstate.b = 1, 2
+					}
+				`,
+				"package-state.go": `
+					type PackageState struct {
+						a int
+						b int
+					}
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						pstate.b = 1
+						pstate.a = pstate.b
+						return pstate
+					}`,
+			},
+		},
+		"libify var init order pstate": {
+			// a is never changed, but initialising relies on a pstate variable b, so it must be in
+			// the pstate.
+			// TODO: FIX THIS
+			skip:     true,
+			files:    `func main(){}; var a = b; var b = 1; func f1() { b = 2 }`,
+			mutators: Libify{[]string{"main"}},
+			expected: map[string]string{
+				"main.go": `
+					func main(){}
+
+					func (pstate *PackageState) f1() {
+						pstate.b = 2
+					}
+				`,
 				"package-state.go": `
 					type PackageState struct {
 						a int
@@ -231,34 +313,66 @@ func TestAll(t *testing.T) {
 			},
 		},
 		"update imports": {
-			files:    `import "fmt"; var a = fmt.Sprint("")`,
-			mutators: Libify{[]string{"a"}},
-			expected: map[string]string{
-				"a.go": ``,
-				"package-state.go": `
-					import "fmt"
-					type PackageState struct {
-						a string
-					}
-					func NewPackageState() *PackageState {
-						pstate := &PackageState{}
-						pstate.a = fmt.Sprint("")
-						return pstate
-					}`,
+			files: map[string]map[string]string{
+				"main": {"main.go": `package main; import "b"; func main(){}; var a = b.B(); func f(){ a = "c" }`},
+				"b":    {"b.go": `package b; func B() string { return "b" }`},
+			},
+			mutators: Libify{[]string{"main"}},
+			expected: map[string]map[string]string{
+				"main": {
+					"main.go": `
+						package main
+						func main(){}
+
+						func (pstate *PackageState) f() {
+							pstate.a = "c"
+						}`,
+					"package-state.go": `
+						package main
+						import "b"
+						type PackageState struct {
+							b *b.PackageState
+
+							a string
+						}
+						func NewPackageState(b_pstate *b.PackageState) *PackageState {
+							pstate := &PackageState{}
+							pstate.b = b_pstate
+							pstate.a = b.B()
+							return pstate
+						}`,
+				},
+				"b": {
+					"b.go": `
+						package b
+						func B() string { return "b" }`,
+					"package-state.go": `
+						package b
+						type PackageState struct {
+						}
+						func NewPackageState() *PackageState {
+							pstate := &PackageState{}
+							return pstate
+						}`,
+				},
 			},
 		},
 		"two packages": {
 			files: map[string]map[string]string{
-				"a": {"a.go": `package a; import "b"; func a(){b.B()}`},
-				"b": {"b.go": `package b; func B(){a++}; var a = 1`},
+				"main": {"main.go": `package main; import "b"; func main(){}; func a(){b.B()}`},
+				"b":    {"b.go": `package b; func B(){a++}; var a = 1`},
 			},
-			mutators: Libify{[]string{"a"}},
+			mutators: Libify{[]string{"main"}},
 			expected: map[string]map[string]string{
-				"a": {
-					"a.go": `func (pstate *PackageState) a(){
-						pstate.b.B()
-					}`,
+				"main": {
+					"main.go": `
+						package main 
+						func main(){} 
+						func (pstate *PackageState) a(){
+							pstate.b.B()
+						}`,
 					"package-state.go": `
+						package main
 						import "b"
 						type PackageState struct {
 							b *b.PackageState
@@ -270,7 +384,9 @@ func TestAll(t *testing.T) {
 						}`,
 				},
 				"b": {
-					"b.go": `package b; func (pstate *PackageState) B(){
+					"b.go": `
+						package b
+						func (pstate *PackageState) B(){
 							pstate.a++
 						}`,
 					"package-state.go": `
@@ -288,7 +404,7 @@ func TestAll(t *testing.T) {
 		},
 	}
 
-	single := "libify var init" // during dev, set this to the name of a test case to just run that single case
+	single := "" // during dev, set this to the name of a test case to just run that single case
 
 	if single != "" {
 		tests = map[string]testspec{single: tests[single]}

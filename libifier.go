@@ -632,10 +632,14 @@ func (l *Libifier) updateDecls() error {
 								// definitions of vars that are included in the package state should
 								// be deleted, so only append the name if it's not included
 								names = append(names, name)
-								values = append(values, spec.Values[i])
+								if len(spec.Values) > 0 {
+									values = append(values, spec.Values[i])
+								}
 							} else {
 								namesMoved = append(namesMoved, name)
-								valuesMoved = append(valuesMoved, spec.Values[i])
+								if len(spec.Values) > 0 {
+									valuesMoved = append(valuesMoved, spec.Values[i])
+								}
 							}
 						}
 						if len(names) > 0 {

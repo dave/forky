@@ -120,9 +120,16 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	fmt.Println("mutated vars:")
-	for v := range l.varMutated {
-		fmt.Println(v.Name())
+	fmt.Println("all vars:")
+	for relpath, pkg := range l.packages {
+		for ob := range pkg.varObjects {
+			fmt.Print(relpath, " ", ob.Name())
+			if l.varMutated[ob] {
+				fmt.Println(" mutated")
+			} else {
+				fmt.Println("")
+			}
+		}
 	}
 
 	//if err := l.generateCallGraph(); err != nil {
@@ -371,7 +378,6 @@ func (l *Libifier) findVarMutations() error {
 					ms := l.ssa.MethodSets.MethodSet(t)
 					for i := 0; i < ms.Len(); i++ {
 						f := l.ssa.MethodValue(ms.At(i))
-						//f := l.ssa.LookupMethod(sel.Recv(), sel.Obj().Pkg(), sel.Obj().(*types.Func).Name())
 						functions = append(functions, info{f, true})
 					}
 				}
@@ -380,8 +386,9 @@ func (l *Libifier) findVarMutations() error {
 					// TODO: not a named type - don't scan methods?
 					break
 				}
-				action(t) // TODO: Does it do pointer methods too?
-				//action(types.NewPointer(t))
+				action(t)
+				action(types.NewPointer(t))
+				// TODO: What about **T?
 			}
 		}
 
@@ -401,7 +408,8 @@ func (l *Libifier) findVarMutations() error {
 			for _, block := range blocks {
 				for _, ins := range block.Instrs {
 
-					action := func(v ssa.Value) {
+					var action func(v ssa.Value)
+					action = func(v ssa.Value) {
 						switch v := v.(type) {
 						case *ssa.Global:
 							config.AddQuery(v)
@@ -410,11 +418,11 @@ func (l *Libifier) findVarMutations() error {
 							if v.Op != token.MUL {
 								panic(fmt.Sprintf("UnOp without *: %v", v.Op))
 							}
-							config.AddQuery(v.X)
-							switch x := v.X.(type) {
-							case *ssa.Global:
-								modified = append(modified, x)
-							}
+							action(v.X)
+						case *ssa.IndexAddr:
+							action(v.X)
+						case *ssa.FieldAddr:
+							action(v.X)
 						default:
 							config.AddQuery(v)
 						}
@@ -425,8 +433,6 @@ func (l *Libifier) findVarMutations() error {
 						action(ins.Addr)
 					case *ssa.MapUpdate:
 						action(ins.Map)
-					case *ssa.IndexAddr:
-						action(ins.X)
 					case *ssa.UnOp:
 						//fmt.Printf("ins.(type): %T %v\n", ins, ins.Op)
 					case *ssa.Call, *ssa.Return:
@@ -449,22 +455,61 @@ func (l *Libifier) findVarMutations() error {
 
 	for _, q := range result.Queries {
 		for _, label := range q.PointsTo().Labels() {
-			switch v := label.Value().(type) {
-			case *ssa.Global:
-				modified = append(modified, v)
-			case *ssa.MakeMap:
-				// with maps, we get the makemap instruction where the map is created. To link this
-				// to a Global we have to look in the Referrers list for a Store to a Global.
-				for _, r := range *v.Referrers() {
-					switch r := r.(type) {
-					case *ssa.Store:
-						switch addr := r.Addr.(type) {
-						case *ssa.Global:
-							modified = append(modified, addr)
-						}
+			var actionReferrer func(v ssa.Instruction, value ssa.Value)
+			var actionValue func(v ssa.Value)
+			actionReferrer = func(ins ssa.Instruction, value ssa.Value) {
+				//fmt.Printf("REF: %T\n", ins)
+				switch ins := ins.(type) {
+				case *ssa.Store:
+					if value == ins.Val {
+						// only continue if the value is the Val operand
+						actionValue(ins.Addr)
+					}
+				case *ssa.MapUpdate:
+					if value == ins.Value {
+						// only continue if the value is the Value operand
+						actionValue(ins.Map)
+					}
+				//case *ssa.FieldAddr:
+				// actionValue(ins.X)
+				//	for _, r := range *ins.Referrers() {
+				//		actionReferrer(r, ins)
+				//	}
+				case *ssa.IndexAddr:
+					for _, r := range *ins.Referrers() {
+						actionReferrer(r, ins)
+					}
+				case *ssa.Slice:
+					for _, r := range *ins.Referrers() {
+						actionReferrer(r, ins)
 					}
 				}
 			}
+
+			actionValue = func(v ssa.Value) {
+				//fmt.Printf("VAL: %T\n", v)
+				switch v := v.(type) {
+				case *ssa.Global:
+					modified = append(modified, v)
+				case *ssa.MakeMap:
+					// with maps, we get the makemap instruction where the map is created. To link this
+					// to a Global we have to look in the Referrers list for a Store to a Global.
+					for _, r := range *v.Referrers() {
+						actionReferrer(r, v)
+					}
+				case *ssa.Alloc:
+					for _, r := range *v.Referrers() {
+						actionReferrer(r, v)
+					}
+				case *ssa.FieldAddr:
+					actionValue(v.X)
+				case *ssa.IndexAddr:
+					actionValue(v.X)
+				}
+			}
+
+			actionValue(label.Value())
+
 		}
 	}
 

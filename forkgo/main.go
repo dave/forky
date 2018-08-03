@@ -106,7 +106,7 @@ var Default = []forky.Mutator{
 
 	forky.Libify{
 		Packages: []string{
-			"src/cmd/compile",
+			//"src/cmd/compile",
 			"src/cmd/link",
 		},
 	},

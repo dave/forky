@@ -1,10 +1,10 @@
 package main
 
 import (
-	"go/ast"
 	"os"
 	"strings"
 
+	"github.com/dave/dst"
 	"github.com/dave/forky"
 )
 
@@ -89,12 +89,12 @@ var Default = []forky.Mutator{
 
 		forky.TestSkip{"src/cmd/compile/internal/gc", "TestBuiltin", "TODO: I think this is failing because we're stripping comments from the AST?"},
 	},
-	forky.DeleteNodes(func(relpath, fname string, node, parent ast.Node) bool {
+	forky.DeleteNodes(func(relpath, fname string, node, parent dst.Node) bool {
 		// Delete `case macho.CpuArm64` clause in objfile/macho.go
 		// TODO: I think this can be reverted after go1.11 is in use.
-		if cc, ok := node.(*ast.CaseClause); ok && len(cc.List) > 0 {
-			if se, ok := cc.List[0].(*ast.SelectorExpr); ok && se.Sel.Name == "CpuArm64" {
-				if x, ok := se.X.(*ast.Ident); ok && x.Name == "macho" {
+		if cc, ok := node.(*dst.CaseClause); ok && len(cc.List) > 0 {
+			if se, ok := cc.List[0].(*dst.SelectorExpr); ok && se.Sel.Name == "CpuArm64" {
+				if x, ok := se.X.(*dst.Ident); ok && x.Name == "macho" {
 					return true
 				}
 			}

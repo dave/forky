@@ -402,12 +402,32 @@ func TestAll(t *testing.T) {
 				},
 			},
 		},
+		"libify type": {
+			single:   true,
+			files:    `func main(){}; type T struct {i int}`,
+			mutators: Libify{[]string{"main"}},
+			expected: map[string]string{
+				"main.go": `func main(){}; type T struct {pstate *PackageState; i int}`,
+				"package-state.go": `
+					type PackageState struct {
+					}
+					func NewPackageState() *PackageState {
+						pstate := &PackageState{}
+						return pstate
+					}`,
+			},
+		},
 	}
 
-	single := "" // during dev, set this to the name of a test case to just run that single case
-
-	if single != "" {
-		tests = map[string]testspec{single: tests[single]}
+	var single bool
+	for name, test := range tests {
+		if test.single {
+			if single {
+				panic("two tests marked as single")
+			}
+			single = true
+			tests = map[string]testspec{name: test}
+		}
 	}
 
 	type named struct {
@@ -432,7 +452,7 @@ func TestAll(t *testing.T) {
 		}
 	}
 
-	if single != "" {
+	if single {
 		t.Fatal("test passed, but failed because single mode is set")
 	}
 	if skipped {
@@ -441,10 +461,10 @@ func TestAll(t *testing.T) {
 }
 
 type testspec struct {
-	skip     bool
-	files    interface{} // either map[string]map[string]string, map[string]string or string
-	mutators interface{} // either Mutator or []Mutator
-	expected interface{} // either map[string]map[string]string, map[string]string or string
+	skip, single bool
+	files        interface{} // either map[string]map[string]string, map[string]string or string
+	mutators     interface{} // either Mutator or []Mutator
+	expected     interface{} // either map[string]map[string]string, map[string]string or string
 }
 
 func runTest(spec testspec) error {

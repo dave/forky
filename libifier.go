@@ -7,8 +7,9 @@ import (
 	"go/types"
 	"sort"
 
+	"github.com/dave/dst"
+	"github.com/dave/dst/dstutil"
 	"github.com/dave/services/progutils"
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -51,12 +52,12 @@ type LibifyPackage struct {
 	libifier    *Libifier
 	relpath     string
 	path        string
-	sessionFile *ast.File
+	sessionFile *dst.File
 	ssa         *ssa.Package
 
-	vars    map[*ast.GenDecl]bool
-	methods map[*ast.FuncDecl]bool
-	funcs   map[*ast.FuncDecl]bool
+	vars    map[*dst.GenDecl]bool
+	methods map[*dst.FuncDecl]bool
+	funcs   map[*dst.FuncDecl]bool
 
 	moved []declspec
 
@@ -65,9 +66,9 @@ type LibifyPackage struct {
 }
 
 type declspec struct {
-	typ    ast.Expr
-	names  []*ast.Ident
-	values []ast.Expr
+	typ    dst.Expr
+	names  []*dst.Ident
+	values []dst.Expr
 }
 
 func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *LibifyPackage {
@@ -78,9 +79,9 @@ func (l *Libifier) NewLibifyPackage(rel, path string, info *PackageInfo) *Libify
 		relpath:     rel,
 		path:        path,
 
-		vars:    map[*ast.GenDecl]bool{},
-		methods: map[*ast.FuncDecl]bool{},
-		funcs:   map[*ast.FuncDecl]bool{},
+		vars:    map[*dst.GenDecl]bool{},
+		methods: map[*dst.FuncDecl]bool{},
+		funcs:   map[*dst.FuncDecl]bool{},
 
 		varObjects: map[types.Object]bool{},
 		varMutated: map[types.Object]bool{},
@@ -110,27 +111,29 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	fmt.Println("analyzeSSA")
-	if err := l.analyzeSSA(); err != nil {
-		return err
-	}
+	/*
+		fmt.Println("analyzeSSA")
+		if err := l.analyzeSSA(); err != nil {
+			return err
+		}
 
-	fmt.Println("findVarMutations")
-	if err := l.findVarMutations(); err != nil {
-		return err
-	}
+		fmt.Println("findVarMutations")
+		if err := l.findVarMutations(); err != nil {
+			return err
+		}
 
-	fmt.Println("all vars:")
-	for relpath, pkg := range l.packages {
-		for ob := range pkg.varObjects {
-			fmt.Print(relpath, " ", ob.Name())
-			if l.varMutated[ob] {
-				fmt.Println(" mutated")
-			} else {
-				fmt.Println("")
+		fmt.Println("all vars:")
+		for relpath, pkg := range l.packages {
+			for ob := range pkg.varObjects {
+				fmt.Print(relpath, " ", ob.Name())
+				if l.varMutated[ob] {
+					fmt.Println(" mutated")
+				} else {
+					fmt.Println("")
+				}
 			}
 		}
-	}
+	*/
 
 	//if err := l.generateCallGraph(); err != nil {
 	//	return err
@@ -175,9 +178,9 @@ func (l *Libifier) includeVar(ob types.Object) bool {
 	if !l.varObjects[ob] {
 		return false
 	}
-	if !l.varMutated[ob] {
-		return false
-	}
+	//if !l.varMutated[ob] {
+	//	return false
+	//}
 	return true
 }
 
@@ -227,13 +230,13 @@ func (l *Libifier) findVars() error {
 
 	for _, pkg := range l.packages {
 		for _, file := range pkg.Files {
-			astutil.Apply(file, func(c *astutil.Cursor) bool {
+			dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.GenDecl:
+				case *dst.GenDecl:
 					if n.Tok != token.VAR {
 						return true
 					}
-					if _, ok := c.Parent().(*ast.DeclStmt); ok {
+					if _, ok := c.Parent().(*dst.DeclStmt); ok {
 						// skip vars inside functions
 						return true
 					}
@@ -241,13 +244,13 @@ func (l *Libifier) findVars() error {
 					pkg.vars[n] = true
 
 					for _, spec := range n.Specs {
-						spec := spec.(*ast.ValueSpec)
+						spec := spec.(*dst.ValueSpec)
 						// look up the object in the types.Defs
 						for _, id := range spec.Names {
 							if id.Name == "_" {
 								continue
 							}
-							def, ok := pkg.Info.Defs[id]
+							def, ok := pkg.Info.Defs[pkg.NodesAst[id].(*ast.Ident)]
 							if !ok {
 								panic(fmt.Sprintf("can't find %s in defs", id.Name))
 							}
@@ -266,17 +269,17 @@ func (l *Libifier) findVars() error {
 func (l *Libifier) findVarUses() error {
 	for _, pkg := range l.packages {
 		for _, file := range pkg.Files {
-			astutil.Apply(file, func(c *astutil.Cursor) bool {
+			dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch decl := c.Node().(type) {
-				case *ast.FuncDecl:
-					obj, ok := pkg.Info.Defs[decl.Name]
+				case *dst.FuncDecl:
+					obj, ok := pkg.Info.Defs[pkg.NodesAst.Ident(decl.Name)]
 					if !ok {
 						panic("func not found in defs " + decl.Name.Name)
 					}
-					astutil.Apply(decl.Body, func(c *astutil.Cursor) bool {
+					dstutil.Apply(decl.Body, func(c *dstutil.Cursor) bool {
 						switch n := c.Node().(type) {
-						case *ast.Ident:
-							use, ok := pkg.Info.Uses[n]
+						case *dst.Ident:
+							use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n)]
 							if !ok {
 								return true
 							}
@@ -346,7 +349,7 @@ func (l *Libifier) findVarMutations() error {
 		for _, pkg := range l.packages {
 			for decl := range pkg.vars {
 				for _, spec := range decl.Specs {
-					spec := spec.(*ast.ValueSpec)
+					spec := spec.(*dst.ValueSpec)
 					for _, name := range spec.Names {
 						val := pkg.ssa.Var(name.Name)
 						if val == nil {
@@ -530,9 +533,9 @@ func (l *Libifier) findVarMutations() error {
 	/*
 		for _, pkg := range l.packages {
 			for _, file := range pkg.Files {
-				astutil.Apply(file, func(c *astutil.Cursor) bool {
+				dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 					switch decl := c.Node().(type) {
-					case *ast.FuncDecl:
+					case *dst.FuncDecl:
 
 					}
 					return true
@@ -587,11 +590,11 @@ func (l *Libifier) findFuncs() error {
 
 	for _, pkg := range l.packages {
 		for _, file := range pkg.Files {
-			astutil.Apply(file, func(c *astutil.Cursor) bool {
+			dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.FuncDecl:
+				case *dst.FuncDecl:
 
-					def, ok := pkg.Info.Defs[n.Name]
+					def, ok := pkg.Info.Defs[pkg.NodesAst.Ident(n.Name)]
 					if !ok {
 						panic(fmt.Sprintf("can't find %s in defs", n.Name.Name))
 					}
@@ -685,21 +688,21 @@ func (l *Libifier) findFuncs() error {
 func (l *Libifier) updateDecls() error {
 	for _, pkg := range l.packages {
 		for fname, file := range pkg.Files {
-			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
+			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.GenDecl:
+				case *dst.GenDecl:
 					if !pkg.vars[n] {
 						break
 					}
-					var specs []ast.Spec
+					var specs []dst.Spec
 					for _, spec := range n.Specs {
-						spec := spec.(*ast.ValueSpec)
-						var names []*ast.Ident
-						var values []ast.Expr
-						var namesMoved []*ast.Ident
-						var valuesMoved []ast.Expr
+						spec := spec.(*dst.ValueSpec)
+						var names []*dst.Ident
+						var values []dst.Expr
+						var namesMoved []*dst.Ident
+						var valuesMoved []dst.Expr
 						for i, name := range spec.Names {
-							ob := pkg.Info.Defs[name]
+							ob := pkg.Info.Defs[pkg.NodesAst.Ident(name)]
 							if !l.includeVar(ob) {
 								// definitions of vars that are included in the package state should
 								// be deleted, so only append the name if it's not included
@@ -735,24 +738,24 @@ func (l *Libifier) updateDecls() error {
 						c.Delete()
 					}
 
-				case *ast.FuncDecl:
+				case *dst.FuncDecl:
 					switch {
 					case pkg.methods[n]:
 						// if method, add "pstate *PackageState" as the first parameter
-						pstate := &ast.Field{
-							Names: []*ast.Ident{ast.NewIdent("pstate")},
-							Type: &ast.StarExpr{
-								X: ast.NewIdent("PackageState"),
+						pstate := &dst.Field{
+							Names: []*dst.Ident{dst.NewIdent("pstate")},
+							Type: &dst.StarExpr{
+								X: dst.NewIdent("PackageState"),
 							},
 						}
-						n.Type.Params.List = append([]*ast.Field{pstate}, n.Type.Params.List...)
+						n.Type.Params.List = append([]*dst.Field{pstate}, n.Type.Params.List...)
 						c.Replace(n)
 					case pkg.funcs[n]:
 						// if func, add "pstate *PackageState" as the receiver
-						n.Recv = &ast.FieldList{List: []*ast.Field{
+						n.Recv = &dst.FieldList{List: []*dst.Field{
 							{
-								Names: []*ast.Ident{ast.NewIdent("pstate")},
-								Type:  &ast.StarExpr{X: ast.NewIdent("PackageState")},
+								Names: []*dst.Ident{dst.NewIdent("pstate")},
+								Type:  &dst.StarExpr{X: dst.NewIdent("PackageState")},
 							},
 						}}
 						c.Replace(n)
@@ -763,7 +766,7 @@ func (l *Libifier) updateDecls() error {
 			if result == nil {
 				pkg.Files[fname] = nil
 			} else {
-				pkg.Files[fname] = result.(*ast.File)
+				pkg.Files[fname] = result.(*dst.File)
 			}
 		}
 	}
@@ -773,8 +776,8 @@ func (l *Libifier) updateDecls() error {
 func (l *Libifier) createStateFiles() error {
 	for _, pkg := range l.packages {
 
-		pkg.sessionFile = &ast.File{
-			Name: ast.NewIdent(pkg.Info.Pkg.Name()),
+		pkg.sessionFile = &dst.File{
+			Name: dst.NewIdent(pkg.Info.Pkg.Name()),
 		}
 		pkg.Files["package-state.go"] = pkg.sessionFile
 
@@ -792,7 +795,7 @@ func (l *Libifier) createStateFiles() error {
 
 func (pkg *LibifyPackage) addPackageStateStruct() error {
 
-	var fields []*ast.Field
+	var fields []*dst.Field
 
 	importFields, err := pkg.generatePackageStateImportFields()
 	if err != nil {
@@ -812,13 +815,13 @@ func (pkg *LibifyPackage) addPackageStateStruct() error {
 	})
 	fields = append(fields, varFields...)
 
-	pkg.sessionFile.Decls = append(pkg.sessionFile.Decls, &ast.GenDecl{
+	pkg.sessionFile.Decls = append(pkg.sessionFile.Decls, &dst.GenDecl{
 		Tok: token.TYPE,
-		Specs: []ast.Spec{
-			&ast.TypeSpec{
-				Name: ast.NewIdent("PackageState"),
-				Type: &ast.StructType{
-					Fields: &ast.FieldList{
+		Specs: []dst.Spec{
+			&dst.TypeSpec{
+				Name: dst.NewIdent("PackageState"),
+				Type: &dst.StructType{
+					Fields: &dst.FieldList{
 						List: fields,
 					},
 				},
@@ -828,43 +831,43 @@ func (pkg *LibifyPackage) addPackageStateStruct() error {
 	return nil
 }
 
-func (pkg *LibifyPackage) generatePackageStateImportFields() ([]*ast.Field, error) {
+func (pkg *LibifyPackage) generatePackageStateImportFields() ([]*dst.Field, error) {
 	// foo *foo.PackageState
-	var fields []*ast.Field
+	var fields []*dst.Field
 	for _, imp := range pkg.Info.Pkg.Imports() {
 		impPkg := pkg.libifier.packageFromPath(imp.Path())
 		if impPkg == nil {
 			continue
 		}
-		pkgId := ast.NewIdent(imp.Name())
-		f := &ast.Field{
-			Names: []*ast.Ident{ast.NewIdent(imp.Name())},
-			Type: &ast.StarExpr{
-				X: &ast.SelectorExpr{
+		pkgId := dst.NewIdent(imp.Name())
+		f := &dst.Field{
+			Names: []*dst.Ident{dst.NewIdent(imp.Name())},
+			Type: &dst.StarExpr{
+				X: &dst.SelectorExpr{
 					X:   pkgId,
-					Sel: ast.NewIdent("PackageState"),
+					Sel: dst.NewIdent("PackageState"),
 				},
 			},
 		}
 		fields = append(fields, f)
 		// have to add this package usage to the info in order for ImportsHelper to pick them up
-		pkg.Info.Uses[pkgId] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
+		pkg.Info.Uses[pkg.NodesAst.Ident(pkgId)] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
 	}
 	return fields, nil
 }
 
-func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) {
-	var fields []*ast.Field
+func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*dst.Field, error) {
+	var fields []*dst.Field
 	for _, ds := range pkg.moved {
 		if ds.typ != nil {
 			// if a type is specified, we can add the names as one field
-			infoType := pkg.Info.Types[ds.typ]
+			infoType := pkg.Info.Types[pkg.NodesAst.Expr(ds.typ)]
 			if infoType.Type == nil {
 				return nil, fmt.Errorf("no type for %v in %s", ds.names, pkg.relpath)
 			}
-			f := &ast.Field{
+			f := &dst.Field{
 				Names: ds.names,
-				Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
+				Type:  pkg.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
 			}
 			fields = append(fields, f)
 			continue
@@ -875,13 +878,13 @@ func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*ast.Field, error) 
 				continue
 			}
 			value := ds.values[i]
-			infoType := pkg.Info.Types[value]
+			infoType := pkg.Info.Types[pkg.NodesAst.Expr(value)]
 			if infoType.Type == nil {
 				return nil, fmt.Errorf("no type for " + name.Name + " in " + pkg.relpath)
 			}
-			f := &ast.Field{
-				Names: []*ast.Ident{name},
-				Type:  pkg.session.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
+			f := &dst.Field{
+				Names: []*dst.Ident{name},
+				Type:  pkg.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
 			}
 			fields = append(fields, f)
 		}
@@ -900,23 +903,23 @@ func (pkg *LibifyPackage) addNewPackageStateFunc() error {
 		return err
 	}
 
-	pkg.sessionFile.Decls = append(pkg.sessionFile.Decls, &ast.FuncDecl{
-		Name: ast.NewIdent("NewPackageState"),
-		Type: &ast.FuncType{
-			Params: &ast.FieldList{
+	pkg.sessionFile.Decls = append(pkg.sessionFile.Decls, &dst.FuncDecl{
+		Name: dst.NewIdent("NewPackageState"),
+		Type: &dst.FuncType{
+			Params: &dst.FieldList{
 				List: params,
 			},
-			Results: &ast.FieldList{
-				List: []*ast.Field{
+			Results: &dst.FieldList{
+				List: []*dst.Field{
 					{
-						Type: &ast.StarExpr{
-							X: ast.NewIdent("PackageState"),
+						Type: &dst.StarExpr{
+							X: dst.NewIdent("PackageState"),
 						},
 					},
 				},
 			},
 		},
-		Body: &ast.BlockStmt{
+		Body: &dst.BlockStmt{
 			List: body,
 		},
 	})
@@ -924,44 +927,44 @@ func (pkg *LibifyPackage) addNewPackageStateFunc() error {
 	return nil
 }
 
-func (pkg *LibifyPackage) generateNewPackageStateFuncParams() ([]*ast.Field, error) {
-	var params []*ast.Field
+func (pkg *LibifyPackage) generateNewPackageStateFuncParams() ([]*dst.Field, error) {
+	var params []*dst.Field
 	// b_pstate *b.PackageState
 	for _, imp := range pkg.Info.Pkg.Imports() {
 		impPkg := pkg.libifier.packageFromPath(imp.Path())
 		if impPkg == nil {
 			continue
 		}
-		pkgId := ast.NewIdent(imp.Name())
-		f := &ast.Field{
-			Names: []*ast.Ident{ast.NewIdent(fmt.Sprintf("%s_pstate", imp.Name()))},
-			Type: &ast.StarExpr{
-				X: &ast.SelectorExpr{
+		pkgId := dst.NewIdent(imp.Name())
+		f := &dst.Field{
+			Names: []*dst.Ident{dst.NewIdent(fmt.Sprintf("%s_pstate", imp.Name()))},
+			Type: &dst.StarExpr{
+				X: &dst.SelectorExpr{
 					X:   pkgId,
-					Sel: ast.NewIdent("PackageState"),
+					Sel: dst.NewIdent("PackageState"),
 				},
 			},
 		}
 		params = append(params, f)
 		// have to add this package usage to the info in order for ImportsHelper to pick them up
-		pkg.Info.Uses[pkgId] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
+		pkg.Info.Uses[pkg.NodesAst.Ident(pkgId)] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
 	}
 	return params, nil
 }
 
-func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) {
-	var body []ast.Stmt
+func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]dst.Stmt, error) {
+	var body []dst.Stmt
 
 	// Create the package state
 	// pstate := &PackageState{}
-	body = append(body, &ast.AssignStmt{
-		Lhs: []ast.Expr{ast.NewIdent("pstate")},
+	body = append(body, &dst.AssignStmt{
+		Lhs: []dst.Expr{dst.NewIdent("pstate")},
 		Tok: token.DEFINE,
-		Rhs: []ast.Expr{
-			&ast.UnaryExpr{
+		Rhs: []dst.Expr{
+			&dst.UnaryExpr{
 				Op: token.AND,
-				X: &ast.CompositeLit{
-					Type: ast.NewIdent("PackageState"),
+				X: &dst.CompositeLit{
+					Type: dst.NewIdent("PackageState"),
 				},
 			},
 		},
@@ -974,16 +977,16 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) 
 		if impPkg == nil {
 			continue
 		}
-		body = append(body, &ast.AssignStmt{
-			Lhs: []ast.Expr{
-				&ast.SelectorExpr{
-					X:   ast.NewIdent("pstate"),
-					Sel: ast.NewIdent(imp.Name()),
+		body = append(body, &dst.AssignStmt{
+			Lhs: []dst.Expr{
+				&dst.SelectorExpr{
+					X:   dst.NewIdent("pstate"),
+					Sel: dst.NewIdent(imp.Name()),
 				},
 			},
 			Tok: token.ASSIGN,
-			Rhs: []ast.Expr{
-				ast.NewIdent(fmt.Sprintf("%s_pstate", imp.Name())),
+			Rhs: []dst.Expr{
+				dst.NewIdent(fmt.Sprintf("%s_pstate", imp.Name())),
 			},
 		})
 	}
@@ -997,23 +1000,23 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) 
 			if !pkg.libifier.includeVar(v) {
 				continue
 			}
-			body = append(body, &ast.AssignStmt{
-				Lhs: []ast.Expr{
-					&ast.SelectorExpr{
-						X:   ast.NewIdent("pstate"),
-						Sel: ast.NewIdent(v.Name()),
+			body = append(body, &dst.AssignStmt{
+				Lhs: []dst.Expr{
+					&dst.SelectorExpr{
+						X:   dst.NewIdent("pstate"),
+						Sel: dst.NewIdent(v.Name()),
 					},
 				},
 				Tok: token.ASSIGN,
-				Rhs: []ast.Expr{i.Rhs},
+				Rhs: []dst.Expr{pkg.NodesDst.Expr(i.Rhs)},
 			})
 		}
 	}
 
 	// Finally return the package state
-	body = append(body, &ast.ReturnStmt{
-		Results: []ast.Expr{
-			ast.NewIdent("pstate"),
+	body = append(body, &dst.ReturnStmt{
+		Results: []dst.Expr{
+			dst.NewIdent("pstate"),
 		},
 	})
 
@@ -1023,11 +1026,11 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]ast.Stmt, error) 
 func (l *Libifier) updateVarFuncUsage() error {
 	for _, pkg := range l.packages {
 		for fname, file := range pkg.Files {
-			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
+			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.Ident:
+				case *dst.Ident:
 					// a -> pstate.a (only if a is a var or func in the current package)
-					use, ok := pkg.Info.Uses[n]
+					use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n)]
 					if !ok {
 						return true
 					}
@@ -1037,15 +1040,15 @@ func (l *Libifier) updateVarFuncUsage() error {
 							// we trigger on the "a" part of foo.a where foo is another package.
 							return true
 						}
-						c.Replace(&ast.SelectorExpr{
-							X:   ast.NewIdent("pstate"),
+						c.Replace(&dst.SelectorExpr{
+							X:   dst.NewIdent("pstate"),
 							Sel: n,
 						})
 					}
 				}
 				return true
 			}, nil)
-			pkg.Files[fname] = result.(*ast.File)
+			pkg.Files[fname] = result.(*dst.File)
 		}
 	}
 	return nil
@@ -1054,30 +1057,30 @@ func (l *Libifier) updateVarFuncUsage() error {
 func (l *Libifier) updateMethodUsage() error {
 	for _, pkg := range l.packages {
 		for fname, file := range pkg.Files {
-			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
+			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.CallExpr:
-					var id *ast.Ident
+				case *dst.CallExpr:
+					var id *dst.Ident
 					switch fun := n.Fun.(type) {
-					case *ast.Ident:
+					case *dst.Ident:
 						id = fun
-					case *ast.SelectorExpr:
+					case *dst.SelectorExpr:
 						id = fun.Sel
 					default:
 						return true
 					}
-					use, ok := pkg.Info.Uses[id]
+					use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(id)]
 					if !ok {
 						return true
 					}
 
 					if pkg.libifier.methodObjects[use] {
 						if use.Pkg().Path() == pkg.path {
-							n.Args = append([]ast.Expr{ast.NewIdent("pstate")}, n.Args...)
+							n.Args = append([]dst.Expr{dst.NewIdent("pstate")}, n.Args...)
 						} else {
-							n.Args = append([]ast.Expr{&ast.SelectorExpr{
-								X:   ast.NewIdent("pstate"),
-								Sel: ast.NewIdent(use.Pkg().Name()),
+							n.Args = append([]dst.Expr{&dst.SelectorExpr{
+								X:   dst.NewIdent("pstate"),
+								Sel: dst.NewIdent(use.Pkg().Name()),
 							}}, n.Args...)
 						}
 					}
@@ -1086,7 +1089,7 @@ func (l *Libifier) updateMethodUsage() error {
 				}
 				return true
 			}, nil)
-			pkg.Files[fname] = result.(*ast.File)
+			pkg.Files[fname] = result.(*dst.File)
 		}
 	}
 	return nil
@@ -1095,27 +1098,31 @@ func (l *Libifier) updateMethodUsage() error {
 func (l *Libifier) updateSelectorUsage() error {
 	for _, pkg := range l.packages {
 		for fname, file := range pkg.Files {
-			result := astutil.Apply(file, func(c *astutil.Cursor) bool {
+			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *ast.SelectorExpr:
+				case *dst.SelectorExpr:
 					// a.B() -> pstate.a.B() (only if a is a package in the deps)
-					packagePath, _, _, _ := progutils.QualifiedIdentifierInfo(n, pkg.Info.Pkg.Path(), l.session.prog)
+					ase := pkg.NodesAst.SelectorExpr(n)
+					if ase == nil {
+						return true // TODO ???
+					}
+					packagePath, _, _, _ := progutils.QualifiedIdentifierInfo(ase, pkg.Info.Pkg.Path(), l.session.prog)
 					if packagePath == "" {
 						return true
 					}
 					if pkg.libifier.packageFromPath(packagePath) == nil {
 						return true
 					}
-					use, ok := pkg.Info.Uses[n.Sel]
+					use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n.Sel)]
 					if !ok {
 						return true
 					}
 					if pkg.libifier.varObjects[use] || pkg.libifier.funcObjects[use] {
-						pkgName := n.X.(*ast.Ident).Name
-						newNode := &ast.SelectorExpr{
-							X: &ast.SelectorExpr{
-								X:   ast.NewIdent("pstate"),
-								Sel: ast.NewIdent(pkgName),
+						pkgName := n.X.(*dst.Ident).Name
+						newNode := &dst.SelectorExpr{
+							X: &dst.SelectorExpr{
+								X:   dst.NewIdent("pstate"),
+								Sel: dst.NewIdent(pkgName),
 							},
 							Sel: n.Sel,
 						}
@@ -1124,16 +1131,42 @@ func (l *Libifier) updateSelectorUsage() error {
 				}
 				return true
 			}, nil)
-			pkg.Files[fname] = result.(*ast.File)
+			pkg.Files[fname] = result.(*dst.File)
 		}
 	}
 	return nil
 }
 
+/*
+func (l *Libifier) addPstateToTypes() error {
+	for _, pkg := range l.packages {
+		for fname, file := range pkg.Files {
+			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
+				switch n := c.Node().(type) {
+				case *dst.GenDecl:
+					if n.Tok == token.TYPE {
+						for _, s := range n.Specs {
+							s := s.(*dst.TypeSpec)
+							switch t := s.Type.(type) {
+							case *dst.StructType:
+								t.Fields =
+							}
+						}
+					}
+				}
+				return true
+			}, nil)
+			pkg.Files[fname] = result.(*dst.File)
+		}
+	}
+	return nil
+}
+*/
+
 func (l *Libifier) refreshImports() error {
 	for _, pkg := range l.packages {
 		for _, file := range pkg.Files {
-			ih := progutils.NewImportsHelper(pkg.Info.Pkg.Path(), file, l.session.prog)
+			ih := progutils.NewImportsHelper(pkg.Info.Pkg.Path(), pkg.NodesAst.File(file), l.session.prog)
 			ih.RefreshFromCode()
 		}
 	}

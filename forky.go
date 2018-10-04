@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
-	"go/format"
 	"go/parser"
 	"go/token"
 	"io"
@@ -16,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dave/dst"
+	"github.com/dave/dst/decorator"
+	"github.com/dave/dst/dstutil"
 	"github.com/dave/services/fsutil"
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
 	"gopkg.in/src-d/go-billy.v4"
 	"gopkg.in/src-d/go-billy.v4/helper/mount"
@@ -123,11 +124,11 @@ func (s *Session) Run(mutations []Mutator) error {
 						if applyFunc == nil {
 							continue
 						}
-						result := astutil.Apply(file, applyFunc, nil)
+						result := dstutil.Apply(file, applyFunc, nil)
 						if result == nil {
 							pkgInfo.Files[fname] = nil
 						} else {
-							pkgInfo.Files[fname] = result.(*ast.File)
+							pkgInfo.Files[fname] = result.(*dst.File)
 						}
 					}
 				}
@@ -211,16 +212,24 @@ func (s *Session) parse(files map[string]map[string]bool) error {
 			return true
 		}
 
-		astpackages, err := parseDir(s.fs, s.fset, dir, filter, parser.ParseComments)
+		dstpackages, dstnodes, err := parseDir(s.fs, s.fset, dir, filter, parser.ParseComments)
 		if err != nil {
 			return err
 		}
 
+		astnodes := map[dst.Node]ast.Node{}
+		for k, v := range dstnodes {
+			astnodes[v] = k
+		}
+
+		info.NodesAst = astnodes
+		info.NodesDst = dstnodes
+
 		var name string
 		packages := map[string]*PackageInfo{} // package name -> file name -> ast file
 		var hasFiles bool
-		for pkgname, pkg := range astpackages {
-			packages[pkgname] = &PackageInfo{Name: pkgname, Files: map[string]*ast.File{}}
+		for pkgname, pkg := range dstpackages {
+			packages[pkgname] = &PackageInfo{Name: pkgname, Files: map[string]*dst.File{}, NodesDst: dstnodes, NodesAst: astnodes}
 			if strings.HasSuffix(pkgname, "_test") {
 				if name == "" {
 					name = pkgname // only set name to x_test if it doesn't already have a value
@@ -246,39 +255,6 @@ func (s *Session) parse(files map[string]map[string]bool) error {
 			info.Default = packages[name]
 		}
 
-		// Manipulating the AST breaks "lossy" comments - e.g. comments not attached to a node. They
-		// end up being rendered in the wrong place which breaks things. I don't think there's any other
-		// option right now except deleting them all.
-		for _, pkgInfo := range packages {
-			for _, f := range pkgInfo.Files {
-				comments := map[*ast.CommentGroup]bool{}
-				ast.Inspect(f, func(n ast.Node) bool {
-					switch n := n.(type) {
-					case *ast.CommentGroup:
-						comments[n] = true
-					}
-					return true
-				})
-				// delete all comments that don't occur in the inspect
-				var fc []*ast.CommentGroup
-				for _, cg := range f.Comments {
-					if comments[cg] {
-						fc = append(fc, cg)
-						continue
-					}
-					for _, c := range cg.List {
-						// don't delete build tags (they are at the start of the file, so won't get broken
-						// by manipulating AST
-						if strings.HasPrefix(c.Text, "// +build ") {
-							fc = append(fc, cg)
-							break
-						}
-					}
-				}
-				f.Comments = fc
-			}
-		}
-
 		info.Packages = packages
 
 		// build a list of all the parsed files
@@ -300,38 +276,39 @@ func (s *Session) parse(files map[string]map[string]bool) error {
 	return nil
 }
 
-func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(os.FileInfo) bool, mode parser.Mode) (pkgs map[string]*ast.Package, first error) {
+func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(os.FileInfo) bool, mode parser.Mode) (pkgs map[string]*dst.Package, nodes map[ast.Node]dst.Node, first error) {
 	list, err := fs.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	pkgs = make(map[string]*ast.Package)
+	pkgs = make(map[string]*dst.Package)
+	dec := decorator.New()
 	for _, d := range list {
 		if strings.HasSuffix(d.Name(), ".go") && (filter == nil || filter(d)) {
 			fpath := filepath.Join(dir, d.Name())
 			b, err := readFile(fs, fpath)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if src, err := parser.ParseFile(fset, fpath, b, mode); err == nil {
 				name := src.Name.Name
 				pkg, found := pkgs[name]
 				if !found {
-					pkg = &ast.Package{
+					pkg = &dst.Package{
 						Name:  name,
-						Files: make(map[string]*ast.File),
+						Files: make(map[string]*dst.File),
 					}
 					pkgs[name] = pkg
 				}
-				pkg.Files[fpath] = src
+				pkg.Files[fpath] = dec.Decorate(fset, src).(*dst.File)
 			} else if first == nil {
 				first = err
 			}
 		}
 	}
 
-	return
+	return pkgs, dec.Nodes, first
 }
 
 // load the program and scan types
@@ -352,7 +329,7 @@ func (s *Session) load() {
 				rootrelfpath := filepath.Join("gopath", "src", s.destination, relpath, fname)
 
 				buf := &bytes.Buffer{}
-				if err := format.Node(buf, s.fset, file); err != nil {
+				if err := decorator.Fprint(buf, file); err != nil {
 					panic(fmt.Errorf("format.Node error in %s: %v", rootrelfpath, err))
 				}
 
@@ -387,13 +364,20 @@ func (s *Session) load() {
 			// only update packages that exist in s.paths (in infos we also have std lib etc).
 			continue
 		}
-		files := map[string]*ast.File{}
+		files := map[string]*dst.File{}
+		dec := decorator.New()
 		for _, f := range info.Files {
 			_, fname := filepath.Split(s.fset.File(f.Pos()).Name())
-			files[fname] = f
+			files[fname] = dec.Decorate(p.Fset, f).(*dst.File)
+		}
+		nodesAst := map[dst.Node]ast.Node{}
+		for k, v := range dec.Nodes {
+			nodesAst[v] = k
 		}
 		s.paths[relpath].Packages[pkg.Name()].Files = files
 		s.paths[relpath].Packages[pkg.Name()].Info = info
+		s.paths[relpath].Packages[pkg.Name()].NodesDst = dec.Nodes
+		s.paths[relpath].Packages[pkg.Name()].NodesAst = nodesAst
 	}
 }
 
@@ -438,8 +422,8 @@ func (s *Session) Save() error {
 				relfpath := filepath.Join(relpath, fname)
 
 				buf := &bytes.Buffer{}
-				if err := format.Node(buf, s.fset, file); err != nil {
-					return fmt.Errorf("format.Node error in %s: %v", relfpath, err)
+				if err := decorator.Fprint(buf, file); err != nil {
+					return fmt.Errorf("decorator.Fprint error in %s: %v", relfpath, err)
 				}
 
 				if err := fsutil.WriteFile(tempfs, relfpath, 0666, buf); err != nil {
@@ -497,24 +481,88 @@ type PathInfo struct {
 	Default  *PackageInfo            // default package (e.g. not x_test or main)
 	Packages map[string]*PackageInfo // all named packages in dir - e.g. foo, foo_test, main: package name -> package info
 	Extras   map[string]bool         // filenames of all files not included in packages (non-go files, filtered go files etc.)
+	NodesAst map[dst.Node]ast.Node
+	NodesDst map[ast.Node]dst.Node
 }
 
 type PackageInfo struct {
-	Name  string
-	Files map[string]*ast.File // file name -> ast file
-	Info  *loader.PackageInfo
+	Name     string
+	Files    map[string]*dst.File // file name -> ast file
+	Info     *loader.PackageInfo
+	NodesDst DstNodeMap
+	NodesAst AstNodeMap
+}
+
+type DstNodeMap map[ast.Node]dst.Node
+
+func (m DstNodeMap) Ident(n *ast.Ident) *dst.Ident {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*dst.Ident)
+}
+
+func (m DstNodeMap) Expr(n ast.Expr) dst.Expr {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(dst.Expr)
+}
+
+func (m DstNodeMap) SelectorExpr(n *ast.SelectorExpr) *dst.SelectorExpr {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*dst.SelectorExpr)
+}
+
+func (m DstNodeMap) File(n *ast.File) *dst.File {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*dst.File)
+}
+
+type AstNodeMap map[dst.Node]ast.Node
+
+func (m AstNodeMap) Ident(n *dst.Ident) *ast.Ident {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*ast.Ident)
+}
+
+func (m AstNodeMap) Expr(n dst.Expr) ast.Expr {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(ast.Expr)
+}
+
+func (m AstNodeMap) SelectorExpr(n *dst.SelectorExpr) *ast.SelectorExpr {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*ast.SelectorExpr)
+}
+
+func (m AstNodeMap) File(n *dst.File) *ast.File {
+	if m[n] == nil {
+		return nil
+	}
+	return m[n].(*ast.File)
 }
 
 type TestSkipper []TestSkip
 
 func (m TestSkipper) Apply(s *Session) Applier {
 	return Applier{
-		Apply: func(relpath, fname string) func(*astutil.Cursor) bool {
+		Apply: func(relpath, fname string) func(*dstutil.Cursor) bool {
 			if !strings.HasSuffix(fname, "_test.go") {
 				return nil
 			}
-			return func(c *astutil.Cursor) bool {
-				fd, ok := c.Node().(*ast.FuncDecl)
+			return func(c *dstutil.Cursor) bool {
+				fd, ok := c.Node().(*dst.FuncDecl)
 				if !ok {
 					return true
 				}
@@ -536,17 +584,17 @@ func (m TestSkipper) Apply(s *Session) Applier {
 				name := fd.Type.Params.List[0].Names[0].Name
 
 				// create the skip statement
-				skip := &ast.ExprStmt{
-					X: &ast.CallExpr{
-						Fun: &ast.SelectorExpr{
-							X:   ast.NewIdent(name),
-							Sel: ast.NewIdent("Skip"),
+				skip := &dst.ExprStmt{
+					X: &dst.CallExpr{
+						Fun: &dst.SelectorExpr{
+							X:   dst.NewIdent(name),
+							Sel: dst.NewIdent("Skip"),
 						},
-						Args: []ast.Expr{&ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(test.Comment)}},
+						Args: []dst.Expr{&dst.BasicLit{Kind: token.STRING, Value: strconv.Quote(test.Comment)}},
 					},
 				}
 
-				fd.Body.List = append([]ast.Stmt{skip}, fd.Body.List...)
+				fd.Body.List = append([]dst.Stmt{skip}, fd.Body.List...)
 
 				return true
 			}
@@ -558,7 +606,7 @@ type TestSkip struct {
 	Path, Name, Comment string
 }
 
-type Manual func(relpath, fname string) func(c *astutil.Cursor) bool
+type Manual func(relpath, fname string) func(c *dstutil.Cursor) bool
 
 func (m Manual) Apply(s *Session) Applier {
 	return Applier{
@@ -566,12 +614,12 @@ func (m Manual) Apply(s *Session) Applier {
 	}
 }
 
-type DeleteNodes func(relpath, fname string, node, parent ast.Node) bool
+type DeleteNodes func(relpath, fname string, node, parent dst.Node) bool
 
 func (m DeleteNodes) Apply(s *Session) Applier {
 	return Applier{
-		Apply: func(relpath, fname string) func(c *astutil.Cursor) bool {
-			return func(c *astutil.Cursor) bool {
+		Apply: func(relpath, fname string) func(c *dstutil.Cursor) bool {
+			return func(c *dstutil.Cursor) bool {
 				if m(relpath, fname, c.Node(), c.Parent()) {
 					c.Delete()
 					return false
@@ -601,9 +649,9 @@ func (m *PathReplacer) init() {
 func (m *PathReplacer) Apply(s *Session) Applier {
 	m.init()
 	return Applier{
-		Apply: func(relpath, fname string) func(c *astutil.Cursor) bool {
-			return func(c *astutil.Cursor) bool {
-				if bl, ok := c.Node().(*ast.BasicLit); ok && bl.Kind == token.STRING {
+		Apply: func(relpath, fname string) func(c *dstutil.Cursor) bool {
+			return func(c *dstutil.Cursor) bool {
+				if bl, ok := c.Node().(*dst.BasicLit); ok && bl.Kind == token.STRING {
 					s, err := strconv.Unquote(bl.Value)
 					if err != nil {
 						panic(err)
@@ -614,10 +662,9 @@ func (m *PathReplacer) Apply(s *Session) Applier {
 					if strconv.Quote(s) == bl.Value {
 						return false
 					}
-					c.Replace(&ast.BasicLit{
-						ValuePos: bl.ValuePos,
-						Kind:     token.STRING,
-						Value:    strconv.Quote(s),
+					c.Replace(&dst.BasicLit{
+						Kind:  token.STRING,
+						Value: strconv.Quote(s),
 					})
 				}
 				return true
@@ -630,18 +677,17 @@ type ModifyStrings func(s string) string
 
 func (m ModifyStrings) Apply(s *Session) Applier {
 	return Applier{
-		Apply: func(relpath, fname string) func(c *astutil.Cursor) bool {
-			return func(c *astutil.Cursor) bool {
-				if bl, ok := c.Node().(*ast.BasicLit); ok && bl.Kind == token.STRING {
+		Apply: func(relpath, fname string) func(c *dstutil.Cursor) bool {
+			return func(c *dstutil.Cursor) bool {
+				if bl, ok := c.Node().(*dst.BasicLit); ok && bl.Kind == token.STRING {
 					s, err := strconv.Unquote(bl.Value)
 					if err != nil {
 						panic(err)
 					}
 					s = m(s)
-					c.Replace(&ast.BasicLit{
-						ValuePos: bl.ValuePos,
-						Kind:     token.STRING,
-						Value:    strconv.Quote(s),
+					c.Replace(&dst.BasicLit{
+						Kind:  token.STRING,
+						Value: strconv.Quote(s),
 					})
 				}
 				return true
@@ -660,7 +706,7 @@ func (m FilterFiles) Apply(s *Session) Applier {
 
 type Applier struct {
 	FileFilter func(relpath, fname string) bool
-	Apply      func(relpath, fname string) func(*astutil.Cursor) bool
+	Apply      func(relpath, fname string) func(*dstutil.Cursor) bool
 	Func       func()
 }
 

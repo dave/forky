@@ -31,6 +31,7 @@ type Session struct {
 	fs                  billy.Filesystem
 	gorootfs            billy.Filesystem
 	fset                *token.FileSet
+	dir                 string               // source dir
 	source, destination string               // root path of source and destination
 	paths               map[string]*PathInfo // relative path from root -> path info (may include several packages)
 	gopathsrc           string
@@ -39,12 +40,13 @@ type Session struct {
 	prog                *loader.Program
 }
 
-func NewSession(source, destination string) *Session {
+func NewSession(dir, source, destination string) *Session {
 	return &Session{
 		fs:          osfs.New("/"),
 		gorootfs:    polyfill.New(mount.New(memfs.New(), "/goroot", osfs.New(build.Default.GOROOT))),
 		gopathsrc:   filepath.Join(build.Default.GOPATH, "src"),
 		fset:        token.NewFileSet(),
+		dir:         dir,
 		source:      source,
 		destination: destination,
 		paths:       map[string]*PathInfo{},
@@ -151,18 +153,16 @@ func (s *Session) Run(mutations []Mutator) error {
 }
 
 func (s *Session) getFiles() (map[string]map[string]bool, error) {
-	rootDir := filepath.Join(s.gopathsrc, s.source)
-
 	// make list of files by relpath
 	files := map[string]map[string]bool{} // full file path -> true
 
-	if err := fsutil.Walk(s.fs, rootDir, func(fs billy.Filesystem, fpath string, finfo os.FileInfo, err error) error {
+	if err := fsutil.Walk(s.fs, s.dir, func(fs billy.Filesystem, fpath string, finfo os.FileInfo, err error) error {
 		if finfo == nil {
 			return nil
 		}
 		if !finfo.IsDir() {
 			dir, fname := filepath.Split(fpath)
-			reldir, err := filepath.Rel(rootDir, dir)
+			reldir, err := filepath.Rel(s.dir, dir)
 			if err != nil {
 				return err
 			}
@@ -181,20 +181,18 @@ func (s *Session) getFiles() (map[string]map[string]bool, error) {
 
 func (s *Session) parse(files map[string]map[string]bool) error {
 
-	rootDir := filepath.Join(s.gopathsrc, s.source)
-
 	var count int
 	for relpath := range files {
 
 		count++
 		fmt.Fprintf(s.out, "\rParsing: %d/%d", count, len(files))
 
-		dir := filepath.Join(rootDir, relpath)
-		path := dirToPath(filepath.Join(s.source, relpath))
+		dir := filepath.Join(s.dir, relpath)
+		pkg := dirToPath(filepath.Join(s.source, relpath))
 
 		info := &PathInfo{
 			Dir:      dir,
-			Path:     path,
+			Path:     pkg,
 			Relpath:  relpath,
 			Packages: map[string]*PackageInfo{},
 			Extras:   map[string]bool{},
@@ -433,7 +431,7 @@ func (s *Session) Save() error {
 		}
 		// extras
 		for fname := range pathInfo.Extras {
-			from := filepath.Join(s.gopathsrc, s.source, relpath, fname)
+			from := filepath.Join(s.dir, relpath, fname)
 			to := filepath.Join(relpath, fname)
 			if err := fsutil.Copy(tempfs, to, s.fs, from); err != nil {
 				return err
@@ -441,6 +439,7 @@ func (s *Session) Save() error {
 		}
 	}
 	destinationDir := filepath.Join(s.gopathsrc, s.destination)
+	s.fs.MkdirAll(destinationDir, 0777)
 	if err := removeContents(s.fs, destinationDir); err != nil {
 		return err
 	}

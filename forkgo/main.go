@@ -8,6 +8,8 @@ import (
 	"github.com/dave/forky"
 )
 
+const sourceDir = "/Users/dave/src-tmp/go.googlesource.com/go"
+const sourcePath = "go.googlesource.com/go"
 const destinationPath = "github.com/dave/golib"
 const pathPrefix = destinationPath + "/src/"
 
@@ -18,7 +20,7 @@ func main() {
 }
 
 func run() error {
-	s := forky.NewSession("go.googlesource.com/go", destinationPath)
+	s := forky.NewSession(sourceDir, sourcePath, destinationPath)
 
 	s.ParseFilter = func(relpath string, file os.FileInfo) bool {
 		if strings.Contains(relpath, "/testdata/") || strings.HasSuffix(relpath, "/testdata") {

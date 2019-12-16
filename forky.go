@@ -15,6 +15,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dave/dst/decorator/resolver"
+
+	"github.com/dave/dst/decorator/resolver/gotypes"
+
 	"github.com/dave/dst"
 	"github.com/dave/dst/decorator"
 	"github.com/dave/dst/dstutil"
@@ -281,7 +285,7 @@ func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(
 	}
 
 	pkgs = make(map[string]*dst.Package)
-	dec := decorator.New()
+	dec := decorator.New(fset)
 	for _, d := range list {
 		if strings.HasSuffix(d.Name(), ".go") && (filter == nil || filter(d)) {
 			fpath := filepath.Join(dir, d.Name())
@@ -299,14 +303,14 @@ func parseDir(fs billy.Filesystem, fset *token.FileSet, dir string, filter func(
 					}
 					pkgs[name] = pkg
 				}
-				pkg.Files[fpath] = dec.Decorate(fset, src).(*dst.File)
+				pkg.Files[fpath] = dec.DecorateFile(src)
 			} else if first == nil {
 				first = err
 			}
 		}
 	}
 
-	return pkgs, dec.Nodes, first
+	return pkgs, dec.Dst.Nodes, first
 }
 
 // load the program and scan types
@@ -363,19 +367,40 @@ func (s *Session) load() {
 			continue
 		}
 		files := map[string]*dst.File{}
-		dec := decorator.New()
+		dec := decorator.New(p.Fset)
+		dec.Path = pkg.Path()
+		dec.Resolver = &gotypes.IdentResolver{
+			Info: &info.Info,
+		}
+
 		for _, f := range info.Files {
 			_, fname := filepath.Split(s.fset.File(f.Pos()).Name())
-			files[fname] = dec.Decorate(p.Fset, f).(*dst.File)
-		}
-		nodesAst := map[dst.Node]ast.Node{}
-		for k, v := range dec.Nodes {
-			nodesAst[v] = k
+			file := dec.DecorateFile(f)
+
+			// remove all SelectorExpr with Sel.Path != ""
+			file = dstutil.Apply(file, func(c *dstutil.Cursor) bool {
+				switch n := c.Node().(type) {
+				case *dst.SelectorExpr:
+					if n.Sel.Path == "" {
+						return true
+					}
+					astSel := dec.Ast.Nodes[n]
+					astId := dec.Ast.Nodes[n.Sel]
+					dstId := n.Sel
+					dec.Ast.Nodes[dstId] = astSel
+					dec.Dst.Nodes[astSel] = dstId
+					dec.Dst.Nodes[astId] = dstId
+					c.Replace(n.Sel)
+				}
+				return true
+			}, nil).(*dst.File)
+
+			files[fname] = file
 		}
 		s.paths[relpath].Packages[pkg.Name()].Files = files
 		s.paths[relpath].Packages[pkg.Name()].Info = info
-		s.paths[relpath].Packages[pkg.Name()].NodesDst = dec.Nodes
-		s.paths[relpath].Packages[pkg.Name()].NodesAst = nodesAst
+		s.paths[relpath].Packages[pkg.Name()].NodesDst = dec.Dst.Nodes
+		s.paths[relpath].Packages[pkg.Name()].NodesAst = dec.Ast.Nodes
 	}
 }
 
@@ -405,6 +430,8 @@ func (s *Session) Rel(path string) (rel string, found bool) {
 func (s *Session) Save() error {
 	tempfs := memfs.New()
 
+	destinationDir := filepath.Join(s.gopathsrc, s.destination)
+
 	var count int
 	for relpath, pathInfo := range s.paths {
 
@@ -413,14 +440,19 @@ func (s *Session) Save() error {
 
 		// go packages
 		for _, pkgInfo := range pathInfo.Packages {
+			res := decorator.NewRestorer()
+			res.Path = path.Join(s.destination, pathInfo.Relpath)
+			res.Resolver = &resolver.Guess{} // TODO: can only resolve package names after files are written, so to use gobuild.PackageResolver, we need to order the packages in initialisation order
+
 			for fname, file := range pkgInfo.Files {
 				if file == nil {
 					continue
 				}
+
 				relfpath := filepath.Join(relpath, fname)
 
 				buf := &bytes.Buffer{}
-				if err := decorator.Fprint(buf, file); err != nil {
+				if err := res.Fprint(buf, file); err != nil {
 					return fmt.Errorf("decorator.Fprint error in %s: %v", relfpath, err)
 				}
 
@@ -438,7 +470,7 @@ func (s *Session) Save() error {
 			}
 		}
 	}
-	destinationDir := filepath.Join(s.gopathsrc, s.destination)
+
 	s.fs.MkdirAll(destinationDir, 0777)
 	if err := removeContents(s.fs, destinationDir); err != nil {
 		return err
@@ -528,7 +560,14 @@ func (m AstNodeMap) Ident(n *dst.Ident) *ast.Ident {
 	if m[n] == nil {
 		return nil
 	}
-	return m[n].(*ast.Ident)
+	switch node := m[n].(type) {
+	case *ast.Ident:
+		return node
+	case *ast.SelectorExpr:
+		return node.Sel
+	default:
+		panic("node not ident or selectorexpr")
+	}
 }
 
 func (m AstNodeMap) Expr(n dst.Expr) ast.Expr {

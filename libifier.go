@@ -9,7 +9,6 @@ import (
 
 	"github.com/dave/dst"
 	"github.com/dave/dst/dstutil"
-	"github.com/dave/services/progutils"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -167,10 +166,6 @@ func (l *Libifier) Run() error {
 		return err
 	}
 
-	if err := l.refreshImports(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -217,6 +212,9 @@ func (l *Libifier) scanDeps() error {
 		info := l.session.paths[relpath].Default
 		if info == nil {
 			return fmt.Errorf("no default package for %s", relpath)
+		}
+		if info.Name == "main_test" {
+			continue
 		}
 		scan(info)
 		l.packages[relpath] = l.NewLibifyPackage(relpath, info.Info.Pkg.Path(), info)
@@ -279,6 +277,9 @@ func (l *Libifier) findVarUses() error {
 					dstutil.Apply(decl.Body, func(c *dstutil.Cursor) bool {
 						switch n := c.Node().(type) {
 						case *dst.Ident:
+							if n.Path != "" {
+								return true
+							}
 							use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n)]
 							if !ok {
 								return true
@@ -835,23 +836,16 @@ func (pkg *LibifyPackage) generatePackageStateImportFields() ([]*dst.Field, erro
 	// foo *foo.PackageState
 	var fields []*dst.Field
 	for _, imp := range pkg.Info.Pkg.Imports() {
-		impPkg := pkg.libifier.packageFromPath(imp.Path())
-		if impPkg == nil {
-			continue
-		}
-		pkgId := dst.NewIdent(imp.Name())
 		f := &dst.Field{
 			Names: []*dst.Ident{dst.NewIdent(imp.Name())},
 			Type: &dst.StarExpr{
-				X: &dst.SelectorExpr{
-					X:   pkgId,
-					Sel: dst.NewIdent("PackageState"),
+				X: &dst.Ident{
+					Name: "PackageState",
+					Path: imp.Path(),
 				},
 			},
 		}
 		fields = append(fields, f)
-		// have to add this package usage to the info in order for ImportsHelper to pick them up
-		pkg.Info.Uses[pkg.NodesAst.Ident(pkgId)] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
 	}
 	return fields, nil
 }
@@ -863,10 +857,14 @@ func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*dst.Field, error) 
 			// if a type is specified, we can add the names as one field
 			infoType := pkg.Info.Types[pkg.NodesAst.Expr(ds.typ)]
 			if infoType.Type == nil {
-				return nil, fmt.Errorf("no type for %v in %s", ds.names, pkg.relpath)
+				return nil, fmt.Errorf("1 no type for %v in %s", ds.names, pkg.relpath)
+			}
+			var names []*dst.Ident
+			for _, v := range ds.names {
+				names = append(names, dst.Clone(v).(*dst.Ident))
 			}
 			f := &dst.Field{
-				Names: ds.names,
+				Names: names,
 				Type:  pkg.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
 			}
 			fields = append(fields, f)
@@ -880,10 +878,10 @@ func (pkg *LibifyPackage) generatePackageStateVarFields() ([]*dst.Field, error) 
 			value := ds.values[i]
 			infoType := pkg.Info.Types[pkg.NodesAst.Expr(value)]
 			if infoType.Type == nil {
-				return nil, fmt.Errorf("no type for " + name.Name + " in " + pkg.relpath)
+				return nil, fmt.Errorf("2 no type for " + name.Name + " in " + pkg.relpath)
 			}
 			f := &dst.Field{
-				Names: []*dst.Ident{name},
+				Names: []*dst.Ident{dst.Clone(name).(*dst.Ident)},
 				Type:  pkg.typeToAstTypeSpec(infoType.Type, pkg.path, pkg.sessionFile),
 			}
 			fields = append(fields, f)
@@ -931,23 +929,13 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncParams() ([]*dst.Field, err
 	var params []*dst.Field
 	// b_pstate *b.PackageState
 	for _, imp := range pkg.Info.Pkg.Imports() {
-		impPkg := pkg.libifier.packageFromPath(imp.Path())
-		if impPkg == nil {
-			continue
-		}
-		pkgId := dst.NewIdent(imp.Name())
 		f := &dst.Field{
 			Names: []*dst.Ident{dst.NewIdent(fmt.Sprintf("%s_pstate", imp.Name()))},
 			Type: &dst.StarExpr{
-				X: &dst.SelectorExpr{
-					X:   pkgId,
-					Sel: dst.NewIdent("PackageState"),
-				},
+				X: &dst.Ident{Name: "PackageState", Path: imp.Path()},
 			},
 		}
 		params = append(params, f)
-		// have to add this package usage to the info in order for ImportsHelper to pick them up
-		pkg.Info.Uses[pkg.NodesAst.Ident(pkgId)] = types.NewPkgName(0, pkg.Info.Pkg, imp.Name(), imp)
 	}
 	return params, nil
 }
@@ -1008,7 +996,7 @@ func (pkg *LibifyPackage) generateNewPackageStateFuncBody() ([]dst.Stmt, error) 
 					},
 				},
 				Tok: token.ASSIGN,
-				Rhs: []dst.Expr{pkg.NodesDst.Expr(i.Rhs)},
+				Rhs: []dst.Expr{dst.Clone(pkg.NodesDst.Expr(i.Rhs)).(dst.Expr)},
 			})
 		}
 	}
@@ -1100,31 +1088,27 @@ func (l *Libifier) updateSelectorUsage() error {
 		for fname, file := range pkg.Files {
 			result := dstutil.Apply(file, func(c *dstutil.Cursor) bool {
 				switch n := c.Node().(type) {
-				case *dst.SelectorExpr:
+				case *dst.Ident:
 					// a.B() -> pstate.a.B() (only if a is a package in the deps)
-					ase := pkg.NodesAst.SelectorExpr(n)
-					if ase == nil {
-						return true // TODO ???
-					}
-					packagePath, _, _, _ := progutils.QualifiedIdentifierInfo(ase, pkg.Info.Pkg.Path(), l.session.prog)
-					if packagePath == "" {
+					if n.Path == "" {
 						return true
 					}
-					if pkg.libifier.packageFromPath(packagePath) == nil {
+					pkg := pkg.libifier.packageFromPath(n.Path)
+					if pkg == nil {
 						return true
 					}
-					use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n.Sel)]
+					use, ok := pkg.Info.Uses[pkg.NodesAst.Ident(n)]
 					if !ok {
 						return true
 					}
 					if pkg.libifier.varObjects[use] || pkg.libifier.funcObjects[use] {
-						pkgName := n.X.(*dst.Ident).Name
+						pkgName := pkg.Name
 						newNode := &dst.SelectorExpr{
 							X: &dst.SelectorExpr{
 								X:   dst.NewIdent("pstate"),
 								Sel: dst.NewIdent(pkgName),
 							},
-							Sel: n.Sel,
+							Sel: dst.NewIdent(n.Name),
 						}
 						c.Replace(newNode)
 					}
@@ -1162,16 +1146,6 @@ func (l *Libifier) addPstateToTypes() error {
 	return nil
 }
 */
-
-func (l *Libifier) refreshImports() error {
-	for _, pkg := range l.packages {
-		for _, file := range pkg.Files {
-			ih := progutils.NewImportsHelper(pkg.Info.Pkg.Path(), pkg.NodesAst.File(file), l.session.prog)
-			ih.RefreshFromCode()
-		}
-	}
-	return nil
-}
 
 func (l *Libifier) packageFromPath(path string) *LibifyPackage {
 	relpath, ok := l.session.Rel(path)

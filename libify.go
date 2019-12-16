@@ -2,7 +2,6 @@ package forky
 
 import (
 	"fmt"
-	"go/ast"
 	"go/build"
 	"go/token"
 	"go/types"
@@ -12,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/dave/dst"
-	"github.com/dave/services/progutils"
 	"gopkg.in/src-d/go-billy.v4"
 )
 
@@ -229,22 +227,9 @@ func (l *LibifyPackage) typeToAstTypeSpec(t types.Type, path string, f *dst.File
 	case *types.Named:
 		if t.Obj().Pkg() == nil || t.Obj().Pkg().Path() == path {
 			// t.Obj().Pkg() == nil for "error"
-			return dst.NewIdent(t.Obj().Name())
+			return &dst.Ident{Name: t.Obj().Name()}
 		}
-		af := l.NodesAst.File(f)
-		if af == nil {
-			af = &ast.File{}
-		}
-		ih := progutils.NewImportsHelper(t.Obj().Pkg().Path(), af, l.session.prog)
-		name, err := ih.RegisterImport(t.Obj().Pkg().Path())
-		if err != nil {
-			panic(err)
-		}
-
-		return &dst.SelectorExpr{
-			X:   dst.NewIdent(name),
-			Sel: dst.NewIdent(t.Obj().Name()),
-		}
+		return &dst.Ident{Name: t.Obj().Name(), Path: t.Obj().Pkg().Path()}
 	}
 	panic(fmt.Sprintf("unsupported type %T", t))
 }
